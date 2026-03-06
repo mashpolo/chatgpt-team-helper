@@ -7,6 +7,7 @@ import { useAppConfigStore } from '@/stores/appConfig'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import NativeDateInput from '@/components/ui/apple/NativeDateInput.vue'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 
@@ -163,12 +164,12 @@ onMounted(async () => {
 
           <div class="space-y-1">
             <Label class="text-[11px] font-semibold text-gray-500 uppercase tracking-wider">开始</Label>
-            <Input v-model="rangeFrom" type="date" class="h-10 w-full bg-white border-gray-200 rounded-xl sm:w-[160px]" />
+            <NativeDateInput v-model="rangeFrom" placeholder="开始日期" class="w-full sm:w-[160px]" />
           </div>
 
           <div class="space-y-1">
             <Label class="text-[11px] font-semibold text-gray-500 uppercase tracking-wider">结束</Label>
-            <Input v-model="rangeTo" type="date" class="h-10 w-full bg-white border-gray-200 rounded-xl sm:w-[160px]" />
+            <NativeDateInput v-model="rangeTo" placeholder="结束日期" class="w-full sm:w-[160px]" />
           </div>
         </div>
 
