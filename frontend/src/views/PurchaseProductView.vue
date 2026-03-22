@@ -17,7 +17,7 @@
           <span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-[#007AFF]"></span>
         </span>
         <span class="text-[13px] font-medium text-gray-600 dark:text-gray-300 tracking-wide">
-          今日库存 · {{ plan?.availableCount ?? meta?.availableCount ?? '...' }} 个
+          可用库存 · {{ plan?.availableCount ?? meta?.availableCount ?? '...' }} 个
         </span>
       </div>
     </div>
@@ -37,7 +37,14 @@
       {{ errorMessage }}
     </div>
 
-    <div class="relative group perspective-1000">
+    <div
+      v-else-if="isProductUnavailable"
+      class="rounded-2xl border border-amber-200/70 bg-amber-50/70 p-5 text-sm text-amber-700"
+    >
+      当前商品不存在或已下架，请返回商品列表查看可购买内容。
+    </div>
+
+    <div v-else class="relative group perspective-1000">
       <div
         class="absolute -inset-1 bg-gradient-to-r from-blue-600 to-purple-600 rounded-[2rem] blur opacity-25 group-hover:opacity-40 transition duration-700"
       ></div>
@@ -80,7 +87,7 @@
           </div>
 
           <p v-if="isSoldOut" class="text-[13px] text-[#FF3B30] text-center">
-            今日库存不足，请稍后再试。
+            可用库存不足，请稍后再试。
           </p>
           <p v-else-if="isAntiBanOffline" class="text-[13px] text-[#FF3B30] text-center">
             防封禁方案已下线，请返回列表选择其他商品。
@@ -103,7 +110,7 @@
     </div>
 
     <PurchaseCheckoutDrawer
-      v-if="planKey && !isAntiBanOffline"
+      v-if="planKey && plan && !isAntiBanOffline"
       :open="isCheckoutOpen"
       :product-key="planKey"
       :plan="plan"
@@ -140,6 +147,7 @@ const plan = computed<PurchasePlan | null>(() => {
   if (!planKey.value) return null
   return plans.value.find(item => item.key === planKey.value) || null
 })
+const isProductUnavailable = computed(() => !loading.value && Boolean(meta.value) && Boolean(planKey.value) && !plan.value)
 
 const availableCount = computed(() => plan.value?.availableCount ?? meta.value?.availableCount ?? 0)
 const isSoldOut = computed(() => Number(availableCount.value || 0) <= 0)

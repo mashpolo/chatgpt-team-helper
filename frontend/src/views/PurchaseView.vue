@@ -9,7 +9,7 @@
           <span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-[#007AFF]"></span>
         </span>
         <span class="text-[13px] font-medium text-gray-600 dark:text-gray-300 tracking-wide">
-          今日库存 · {{ currentPlan?.availableCount ?? meta?.availableCount ?? '...' }} 个
+          可用库存 · {{ currentPlan?.availableCount ?? meta?.availableCount ?? '...' }} 个
         </span>
       </div>
 

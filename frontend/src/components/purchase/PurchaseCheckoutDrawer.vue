@@ -159,7 +159,7 @@ const handleCreateOrder = async () => {
   errorMessage.value = ''
 
   if (isSoldOut.value) {
-    errorMessage.value = '今日库存不足，请稍后再试'
+    errorMessage.value = '可用库存不足，请稍后再试'
     return
   }
 

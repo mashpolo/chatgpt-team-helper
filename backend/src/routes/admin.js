@@ -18,6 +18,7 @@ import {
 import { getZpaySettings, getZpaySettingsFromEnv, invalidateZpaySettingsCache } from '../utils/zpay-settings.js'
 import { getTurnstileSettings, getTurnstileSettingsFromEnv, invalidateTurnstileSettingsCache } from '../utils/turnstile-settings.js'
 import { getTelegramSettings, getTelegramSettingsFromEnv, invalidateTelegramSettingsCache } from '../utils/telegram-settings.js'
+import { getUpstreamSettings, getUpstreamSettingsFromEnv, invalidateUpstreamSettingsCache } from '../utils/upstream-settings.js'
 import { getFeatureFlags, invalidateFeatureFlagsCache } from '../utils/feature-flags.js'
 import { CHANNEL_KEY_REGEX, getChannelByKey, getChannels, invalidateChannelsCache, normalizeChannelKey } from '../utils/channels.js'
 import { getAccountRecoverySettings, invalidateAccountRecoverySettingsCache } from '../utils/account-recovery-settings.js'
@@ -78,6 +79,27 @@ const toInt = (value, fallback) => {
 
 const ORDER_TYPE_WARRANTY = 'warranty'
 const ORDER_TYPE_NO_WARRANTY = 'no_warranty'
+const CHANNEL_REDEEM_MODE_SET = new Set(['code', 'linux-do', 'xhs', 'xianyu', 'external-card'])
+const CHANNEL_PROVIDER_TYPE_SET = new Set(['local', 'custom-http', 'platform-upstream'])
+const UPSTREAM_PROVIDER_TYPE_SET = new Set(['custom-http', 'platform-upstream'])
+
+const normalizeChannelRedeemMode = (value, fallback = 'code') => {
+  const normalized = String(value ?? '').trim().toLowerCase()
+  if (normalized === 'api') return 'code'
+  return CHANNEL_REDEEM_MODE_SET.has(normalized) ? normalized : fallback
+}
+
+const normalizeChannelProviderType = (value, fallback = 'local') => {
+  const normalized = String(value ?? '').trim().toLowerCase()
+  if (normalized === 'legacy-http') return 'custom-http'
+  return CHANNEL_PROVIDER_TYPE_SET.has(normalized) ? normalized : fallback
+}
+
+const normalizeUpstreamProviderType = (value, fallback = 'custom-http') => {
+  const normalized = String(value ?? '').trim().toLowerCase()
+  if (normalized === 'legacy-http') return 'custom-http'
+  return UPSTREAM_PROVIDER_TYPE_SET.has(normalized) ? normalized : fallback
+}
 const ORDER_TYPE_ANTI_BAN = 'anti_ban'
 const ORDER_TYPE_SET = new Set([ORDER_TYPE_WARRANTY, ORDER_TYPE_NO_WARRANTY, ORDER_TYPE_ANTI_BAN])
 
@@ -139,6 +161,37 @@ const parseBoolean = (value, fallback) => {
   if (['1', 'true', 'yes', 'on'].includes(raw)) return true
   if (['0', 'false', 'no', 'off'].includes(raw)) return false
   return fallback
+}
+
+const DEFAULT_UPSTREAM_CUSTOM_BODY_TEMPLATE = JSON.stringify({
+  userEmail: '{{email}}',
+  cardCode: '{{code}}'
+}, null, 2)
+
+const validateUpstreamJsonTemplate = (template) => {
+  const raw = String(template || '').trim()
+  if (!raw) {
+    return {
+      ok: false,
+      error: '自定义接口 Body JSON 不能为空'
+    }
+  }
+
+  try {
+    const parsed = JSON.parse(raw)
+    if (parsed === null || typeof parsed !== 'object') {
+      return {
+        ok: false,
+        error: '自定义接口 Body JSON 必须是对象或数组'
+      }
+    }
+    return { ok: true }
+  } catch {
+    return {
+      ok: false,
+      error: '自定义接口 Body JSON 格式不正确，或占位符位置不合法'
+    }
+  }
 }
 
 const normalizeMoney2 = (value) => {
@@ -1040,6 +1093,195 @@ router.put('/telegram-settings', async (req, res) => {
     })
   } catch (error) {
     console.error('Update telegram-settings error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+router.get('/upstream-settings', async (req, res) => {
+  try {
+    const db = await getDatabase()
+    const settings = await getUpstreamSettings(db, { forceRefresh: true })
+
+    res.json({
+      upstream: {
+        providerEnabled: Boolean(settings.providerEnabled),
+        providerEnabledStored: Boolean(settings.stored?.providerEnabled),
+        providerType: normalizeUpstreamProviderType(settings.providerType, 'custom-http'),
+        providerTypeStored: Boolean(settings.stored?.providerType),
+        supplierName: String(settings.supplierName || ''),
+        supplierNameStored: Boolean(settings.stored?.supplierName),
+        baseUrl: String(settings.baseUrl || ''),
+        baseUrlStored: Boolean(settings.stored?.baseUrl),
+        customUrl: String(settings.customUrl || ''),
+        customUrlStored: Boolean(settings.stored?.customUrl),
+        customBodyTemplate: String(settings.customBodyTemplate || DEFAULT_UPSTREAM_CUSTOM_BODY_TEMPLATE),
+        customBodyTemplateStored: Boolean(settings.stored?.customBodyTemplate),
+        timeoutMs: Number(settings.timeoutMs || 0) || 0,
+        timeoutMsStored: Boolean(settings.stored?.timeoutMs),
+        outboundApiKeySet: Boolean(String(settings.outboundApiKey || '').trim()),
+        outboundApiKeyStored: Boolean(settings.stored?.outboundApiKey),
+        apiEnabled: Boolean(settings.apiEnabled),
+        apiEnabledStored: Boolean(settings.stored?.apiEnabled),
+        incomingApiKeySet: Boolean(String(settings.apiKey || '').trim()),
+        incomingApiKeyStored: Boolean(settings.stored?.apiKey)
+      }
+    })
+  } catch (error) {
+    console.error('Get upstream-settings error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+router.put('/upstream-settings', async (req, res) => {
+  try {
+    const payload = req.body?.upstream && typeof req.body.upstream === 'object' ? req.body.upstream : (req.body || {})
+    const db = await getDatabase()
+
+    const current = await getUpstreamSettings(db, { forceRefresh: true })
+    const env = getUpstreamSettingsFromEnv()
+
+    const providerEnabled = parseBool(payload.providerEnabled ?? payload.provider_enabled, Boolean(current.providerEnabled))
+    const providerType = normalizeUpstreamProviderType(payload.providerType ?? payload.provider_type, String(current.providerType || env.providerType || 'custom-http'))
+    const supplierName = String(payload.supplierName ?? payload.supplier_name ?? current.supplierName ?? '').trim()
+    const hasBaseUrlInput = payload.baseUrl !== undefined || payload.base_url !== undefined
+    const hasCustomUrlInput = payload.customUrl !== undefined || payload.custom_url !== undefined
+    const hasCustomBodyTemplateInput = payload.customBodyTemplate !== undefined || payload.custom_body_template !== undefined
+
+    const baseUrl = String(payload.baseUrl ?? payload.base_url ?? current.baseUrl ?? '').trim().replace(/\/+$/, '')
+    const customUrl = String(payload.customUrl ?? payload.custom_url ?? current.customUrl ?? '').trim()
+    const customBodyTemplate = String(
+      payload.customBodyTemplate
+      ?? payload.custom_body_template
+      ?? current.customBodyTemplate
+      ?? DEFAULT_UPSTREAM_CUSTOM_BODY_TEMPLATE
+    )
+
+    if (providerType === 'platform-upstream') {
+      if (providerEnabled && !baseUrl) {
+        return res.status(400).json({ error: '启用平台通用接口时必须填写平台 Base URL' })
+      }
+
+      if ((providerEnabled || hasBaseUrlInput) && baseUrl) {
+        try {
+          const parsed = new URL(baseUrl)
+          if (!['http:', 'https:'].includes(parsed.protocol)) {
+            return res.status(400).json({ error: '上游 Base URL 必须是 http(s)' })
+          }
+        } catch {
+          return res.status(400).json({ error: '上游 Base URL 格式不正确' })
+        }
+      }
+    }
+
+    if (providerType === 'custom-http') {
+      if (providerEnabled && !customUrl) {
+        return res.status(400).json({ error: '启用自定义接口时必须填写请求 URL' })
+      }
+
+      if ((providerEnabled || hasCustomUrlInput) && customUrl) {
+        try {
+          const parsed = new URL(customUrl)
+          if (!['http:', 'https:'].includes(parsed.protocol)) {
+            return res.status(400).json({ error: '自定义接口 URL 必须是 http(s)' })
+          }
+        } catch {
+          return res.status(400).json({ error: '自定义接口 URL 格式不正确' })
+        }
+      }
+
+      if (providerEnabled || hasCustomBodyTemplateInput) {
+        const customBodyValidation = validateUpstreamJsonTemplate(customBodyTemplate)
+        if (!customBodyValidation.ok) {
+          return res.status(400).json({ error: customBodyValidation.error })
+        }
+      }
+    }
+
+    const timeoutMs = Math.min(
+      120000,
+      Math.max(1000, toInt(payload.timeoutMs ?? payload.timeout_ms, Number(current.timeoutMs || env.timeoutMs || 15000) || 15000))
+    )
+
+    const outboundApiKeyInput = typeof payload.outboundApiKey === 'string'
+      ? payload.outboundApiKey.trim()
+      : (typeof payload.outbound_api_key === 'string' ? payload.outbound_api_key.trim() : '')
+    let outboundApiKey = String(current.outboundApiKey || '').trim()
+    let shouldUpsertOutboundApiKey = false
+    if (outboundApiKeyInput) {
+      outboundApiKey = outboundApiKeyInput
+      shouldUpsertOutboundApiKey = true
+    } else if (!current.stored?.outboundApiKey) {
+      const envKey = String(env.outboundApiKey || '').trim()
+      if (envKey) {
+        outboundApiKey = envKey
+        shouldUpsertOutboundApiKey = true
+      }
+    }
+
+    const apiEnabled = parseBool(payload.apiEnabled ?? payload.api_enabled, Boolean(current.apiEnabled))
+
+    const incomingApiKeyInput = typeof payload.incomingApiKey === 'string'
+      ? payload.incomingApiKey.trim()
+      : (typeof payload.incoming_api_key === 'string' ? payload.incoming_api_key.trim() : '')
+    let incomingApiKey = String(current.apiKey || '').trim()
+    let shouldUpsertIncomingApiKey = false
+    if (incomingApiKeyInput) {
+      incomingApiKey = incomingApiKeyInput
+      shouldUpsertIncomingApiKey = true
+    } else if (!current.stored?.apiKey) {
+      const envKey = String(env.apiKey || '').trim()
+      if (envKey) {
+        incomingApiKey = envKey
+        shouldUpsertIncomingApiKey = true
+      }
+    }
+
+    upsertSystemConfigValue(db, 'upstream_provider_enabled', providerEnabled ? 'true' : 'false')
+    upsertSystemConfigValue(db, 'upstream_provider_type', providerType)
+    upsertSystemConfigValue(db, 'upstream_supplier_name', supplierName)
+    upsertSystemConfigValue(db, 'upstream_base_url', baseUrl)
+    upsertSystemConfigValue(db, 'upstream_custom_url', customUrl)
+    upsertSystemConfigValue(db, 'upstream_custom_body_template', customBodyTemplate)
+    upsertSystemConfigValue(db, 'upstream_timeout_ms', String(timeoutMs))
+    upsertSystemConfigValue(db, 'upstream_api_enabled', apiEnabled ? 'true' : 'false')
+    if (shouldUpsertOutboundApiKey) {
+      upsertSystemConfigValue(db, 'upstream_outbound_api_key', outboundApiKey)
+    }
+    if (shouldUpsertIncomingApiKey) {
+      upsertSystemConfigValue(db, 'upstream_api_key', incomingApiKey)
+    }
+
+    saveDatabase()
+    invalidateUpstreamSettingsCache()
+
+    const updated = await getUpstreamSettings(db, { forceRefresh: true })
+
+    res.json({
+      upstream: {
+        providerEnabled: Boolean(updated.providerEnabled),
+        providerEnabledStored: Boolean(updated.stored?.providerEnabled),
+        providerType: normalizeUpstreamProviderType(updated.providerType, 'custom-http'),
+        providerTypeStored: Boolean(updated.stored?.providerType),
+        supplierName: String(updated.supplierName || ''),
+        supplierNameStored: Boolean(updated.stored?.supplierName),
+        baseUrl: String(updated.baseUrl || ''),
+        baseUrlStored: Boolean(updated.stored?.baseUrl),
+        customUrl: String(updated.customUrl || ''),
+        customUrlStored: Boolean(updated.stored?.customUrl),
+        customBodyTemplate: String(updated.customBodyTemplate || DEFAULT_UPSTREAM_CUSTOM_BODY_TEMPLATE),
+        customBodyTemplateStored: Boolean(updated.stored?.customBodyTemplate),
+        timeoutMs: Number(updated.timeoutMs || 0) || 0,
+        timeoutMsStored: Boolean(updated.stored?.timeoutMs),
+        outboundApiKeySet: Boolean(String(updated.outboundApiKey || '').trim()),
+        outboundApiKeyStored: Boolean(updated.stored?.outboundApiKey),
+        apiEnabled: Boolean(updated.apiEnabled),
+        apiEnabledStored: Boolean(updated.stored?.apiEnabled),
+        incomingApiKeySet: Boolean(String(updated.apiKey || '').trim()),
+        incomingApiKeyStored: Boolean(updated.stored?.apiKey)
+      }
+    })
+  } catch (error) {
+    console.error('Update upstream-settings error:', error)
     res.status(500).json({ error: 'Internal server error' })
   }
 })
@@ -3351,6 +3593,16 @@ router.post('/channels', async (req, res) => {
       return res.status(400).json({ error: '请输入渠道名称' })
     }
 
+    const redeemMode = normalizeChannelRedeemMode(req.body?.redeemMode ?? req.body?.redeem_mode, 'code')
+    let providerType = normalizeChannelProviderType(
+      req.body?.providerType ?? req.body?.provider_type,
+      redeemMode === 'external-card' ? 'custom-http' : 'local'
+    )
+    if (redeemMode !== 'external-card') {
+      providerType = 'local'
+    } else if (providerType === 'local') {
+      providerType = 'custom-http'
+    }
     const allowCommonFallback = parseBoolean(req.body?.allowCommonFallback ?? req.body?.allow_common_fallback, false)
     const isActive = parseBoolean(req.body?.isActive ?? req.body?.is_active, true)
     const sortOrder = Number.isFinite(Number(req.body?.sortOrder ?? req.body?.sort_order))
@@ -3366,10 +3618,10 @@ router.post('/channels', async (req, res) => {
     db.run(
       `
         INSERT INTO channels (
-          key, name, redeem_mode, allow_common_fallback, is_active, is_builtin, sort_order, created_at, updated_at
-        ) VALUES (?, ?, 'code', ?, ?, 0, ?, DATETIME('now', 'localtime'), DATETIME('now', 'localtime'))
+          key, name, redeem_mode, provider_type, allow_common_fallback, is_active, is_builtin, sort_order, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, DATETIME('now', 'localtime'), DATETIME('now', 'localtime'))
       `,
-      [key, name, allowCommonFallback ? 1 : 0, isActive ? 1 : 0, sortOrder]
+      [key, name, redeemMode, providerType, allowCommonFallback ? 1 : 0, isActive ? 1 : 0, sortOrder]
     )
     saveDatabase()
     invalidateChannelsCache()
@@ -3392,7 +3644,7 @@ router.patch('/channels/:key', async (req, res) => {
     const db = await getDatabase()
     const existingResult = db.exec(
       `
-        SELECT key, name, redeem_mode, allow_common_fallback, is_active, is_builtin, sort_order
+        SELECT key, name, redeem_mode, provider_type, allow_common_fallback, is_active, is_builtin, sort_order
         FROM channels
         WHERE key = ?
         LIMIT 1
@@ -3405,6 +3657,17 @@ router.patch('/channels/:key', async (req, res) => {
     }
 
     const prevName = String(existingRow[1] ?? '').trim()
+    const nextRedeemMode = req.body?.redeemMode !== undefined || req.body?.redeem_mode !== undefined
+      ? normalizeChannelRedeemMode(req.body?.redeemMode ?? req.body?.redeem_mode, String(existingRow[2] || 'code'))
+      : String(existingRow[2] || 'code')
+    let nextProviderType = req.body?.providerType !== undefined || req.body?.provider_type !== undefined
+      ? normalizeChannelProviderType(req.body?.providerType ?? req.body?.provider_type, String(existingRow[3] || 'local'))
+      : String(existingRow[3] || 'local')
+    if (nextRedeemMode !== 'external-card') {
+      nextProviderType = 'local'
+    } else if (nextProviderType === 'local') {
+      nextProviderType = 'custom-http'
+    }
     const updates = []
     const params = []
 
@@ -3413,6 +3676,20 @@ router.patch('/channels/:key', async (req, res) => {
       if (!name) return res.status(400).json({ error: '渠道名称不能为空' })
       updates.push('name = ?')
       params.push(name)
+    }
+
+    if (req.body?.redeemMode !== undefined || req.body?.redeem_mode !== undefined) {
+      updates.push('redeem_mode = ?')
+      params.push(nextRedeemMode)
+    }
+
+    if (
+      req.body?.providerType !== undefined ||
+      req.body?.provider_type !== undefined ||
+      nextProviderType !== String(existingRow[3] || 'local')
+    ) {
+      updates.push('provider_type = ?')
+      params.push(nextProviderType)
     }
 
     if (req.body?.allowCommonFallback !== undefined || req.body?.allow_common_fallback !== undefined) {

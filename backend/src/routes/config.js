@@ -37,6 +37,7 @@ router.get('/runtime', async (req, res) => {
         key: channel.key,
         name: channel.name,
         redeemMode: channel.redeemMode,
+        providerType: channel.providerType,
         allowCommonFallback: channel.allowCommonFallback,
         isActive: channel.isActive,
         isBuiltin: channel.isBuiltin,

@@ -13,6 +13,7 @@ const CHANNEL_LABELS = {
   xhs: '小红书渠道',
   xianyu: '闲鱼渠道',
   'artisan-flow': 'ArtisanFlow 渠道',
+  'external-card': '卡密兑换',
 }
 const DEFAULT_CHANNEL = 'common'
 const DEFAULT_CHANNEL_NAME = CHANNEL_LABELS[DEFAULT_CHANNEL]
@@ -21,6 +22,7 @@ const BUILTIN_CHANNELS = [
     key: 'common',
     name: CHANNEL_LABELS.common,
     redeemMode: 'code',
+    providerType: 'local',
     allowCommonFallback: 0,
     isActive: 1,
     isBuiltin: 1,
@@ -30,6 +32,7 @@ const BUILTIN_CHANNELS = [
     key: 'paypal',
     name: CHANNEL_LABELS.paypal,
     redeemMode: 'code',
+    providerType: 'local',
     allowCommonFallback: 0,
     isActive: 1,
     isBuiltin: 0,
@@ -39,6 +42,7 @@ const BUILTIN_CHANNELS = [
     key: 'linux-do',
     name: CHANNEL_LABELS['linux-do'],
     redeemMode: 'linux-do',
+    providerType: 'local',
     allowCommonFallback: 0,
     isActive: 1,
     isBuiltin: 1,
@@ -48,6 +52,7 @@ const BUILTIN_CHANNELS = [
     key: 'xhs',
     name: CHANNEL_LABELS.xhs,
     redeemMode: 'xhs',
+    providerType: 'local',
     allowCommonFallback: 1,
     isActive: 1,
     isBuiltin: 1,
@@ -57,6 +62,7 @@ const BUILTIN_CHANNELS = [
     key: 'xianyu',
     name: CHANNEL_LABELS.xianyu,
     redeemMode: 'xianyu',
+    providerType: 'local',
     allowCommonFallback: 1,
     isActive: 1,
     isBuiltin: 1,
@@ -65,11 +71,22 @@ const BUILTIN_CHANNELS = [
   {
     key: 'artisan-flow',
     name: CHANNEL_LABELS['artisan-flow'],
-    redeemMode: 'api',
+    redeemMode: 'code',
+    providerType: 'local',
     allowCommonFallback: 0,
     isActive: 1,
     isBuiltin: 0,
     sortOrder: 60
+  },
+  {
+    key: 'external-card',
+    name: CHANNEL_LABELS['external-card'],
+    redeemMode: 'external-card',
+    providerType: 'custom-http',
+    allowCommonFallback: 0,
+    isActive: 1,
+    isBuiltin: 1,
+    sortOrder: 70
   }
 ]
 
@@ -788,6 +805,18 @@ const ensureCoreIndexes = (database) => {
     'CREATE INDEX IF NOT EXISTS idx_redemption_codes_reserved_for_order_no ON redemption_codes (reserved_for_order_no)'
   ) || changed
 
+  changed = ensureIndex(
+    database,
+    'idx_redemption_codes_supplier_status',
+    'CREATE INDEX IF NOT EXISTS idx_redemption_codes_supplier_status ON redemption_codes (supplier_status, is_redeemed)'
+  ) || changed
+
+  changed = ensureIndex(
+    database,
+    'idx_redemption_codes_supplier_request_id',
+    'CREATE INDEX IF NOT EXISTS idx_redemption_codes_supplier_request_id ON redemption_codes (supplier_request_id)'
+  ) || changed
+
   return changed
 }
 
@@ -1210,6 +1239,7 @@ const ensureChannelsTable = (database) => {
           key TEXT UNIQUE NOT NULL,
           name TEXT NOT NULL,
           redeem_mode TEXT NOT NULL DEFAULT 'code',
+          provider_type TEXT NOT NULL DEFAULT 'local',
           allow_common_fallback INTEGER DEFAULT 0,
           is_active INTEGER DEFAULT 1,
           is_builtin INTEGER DEFAULT 0,
@@ -1231,6 +1261,7 @@ const ensureChannelsTable = (database) => {
       addColumn('key', 'key TEXT')
       addColumn('name', 'name TEXT')
       addColumn('redeem_mode', "redeem_mode TEXT NOT NULL DEFAULT 'code'")
+      addColumn('provider_type', "provider_type TEXT NOT NULL DEFAULT 'local'")
       addColumn('allow_common_fallback', 'allow_common_fallback INTEGER DEFAULT 0')
       addColumn('is_active', 'is_active INTEGER DEFAULT 1')
       addColumn('is_builtin', 'is_builtin INTEGER DEFAULT 0')
@@ -1258,19 +1289,46 @@ const ensureChannelsTable = (database) => {
       if (existing[0]?.values?.length) continue
       database.run(
         `
-          INSERT INTO channels (key, name, redeem_mode, allow_common_fallback, is_active, is_builtin, sort_order, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, DATETIME('now', 'localtime'), DATETIME('now', 'localtime'))
+          INSERT INTO channels (key, name, redeem_mode, provider_type, allow_common_fallback, is_active, is_builtin, sort_order, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, DATETIME('now', 'localtime'), DATETIME('now', 'localtime'))
         `,
         [
           channel.key,
           channel.name,
           channel.redeemMode,
+          channel.providerType || 'local',
           Number(channel.allowCommonFallback) ? 1 : 0,
           Number(channel.isActive) ? 1 : 0,
           Number(channel.isBuiltin) ? 1 : 0,
           Number.isFinite(Number(channel.sortOrder)) ? Number(channel.sortOrder) : 0
         ]
       )
+      changed = true
+    }
+
+    database.run(
+      `
+        UPDATE channels
+        SET name = ?,
+            updated_at = DATETIME('now', 'localtime')
+        WHERE key = 'external-card'
+          AND TRIM(COALESCE(name, '')) = '上游卡密渠道'
+      `,
+      [CHANNEL_LABELS['external-card']]
+    )
+    if ((typeof database.getRowsModified === 'function' ? database.getRowsModified() : 0) > 0) {
+      changed = true
+    }
+
+    database.run(
+      `
+        UPDATE channels
+        SET redeem_mode = 'code',
+            updated_at = DATETIME('now', 'localtime')
+        WHERE LOWER(TRIM(COALESCE(redeem_mode, ''))) = 'api'
+      `
+    )
+    if ((typeof database.getRowsModified === 'function' ? database.getRowsModified() : 0) > 0) {
       changed = true
     }
   } catch (error) {
@@ -2177,6 +2235,60 @@ export async function initDatabase() {
               saveDatabase()
             }
 
+            if (!redemptionColumns.includes('fulfillment_mode')) {
+              database.run("ALTER TABLE redemption_codes ADD COLUMN fulfillment_mode TEXT DEFAULT 'internal_invite'")
+              console.log('已添加 fulfillment_mode 列到 redemption_codes 表')
+              saveDatabase()
+            }
+
+            if (!redemptionColumns.includes('supplier_name')) {
+              database.run('ALTER TABLE redemption_codes ADD COLUMN supplier_name TEXT')
+              console.log('已添加 supplier_name 列到 redemption_codes 表')
+              saveDatabase()
+            }
+
+            if (!redemptionColumns.includes('supplier_type')) {
+              database.run('ALTER TABLE redemption_codes ADD COLUMN supplier_type TEXT')
+              console.log('已添加 supplier_type 列到 redemption_codes 表')
+              saveDatabase()
+            }
+
+            if (!redemptionColumns.includes('supplier_request_id')) {
+              database.run('ALTER TABLE redemption_codes ADD COLUMN supplier_request_id TEXT')
+              console.log('已添加 supplier_request_id 列到 redemption_codes 表')
+              saveDatabase()
+            }
+
+            if (!redemptionColumns.includes('supplier_status')) {
+              database.run("ALTER TABLE redemption_codes ADD COLUMN supplier_status TEXT DEFAULT 'pending'")
+              console.log('已添加 supplier_status 列到 redemption_codes 表')
+              saveDatabase()
+            }
+
+            if (!redemptionColumns.includes('supplier_response_code')) {
+              database.run('ALTER TABLE redemption_codes ADD COLUMN supplier_response_code TEXT')
+              console.log('已添加 supplier_response_code 列到 redemption_codes 表')
+              saveDatabase()
+            }
+
+            if (!redemptionColumns.includes('supplier_response_message')) {
+              database.run('ALTER TABLE redemption_codes ADD COLUMN supplier_response_message TEXT')
+              console.log('已添加 supplier_response_message 列到 redemption_codes 表')
+              saveDatabase()
+            }
+
+            if (!redemptionColumns.includes('supplier_response_raw')) {
+              database.run('ALTER TABLE redemption_codes ADD COLUMN supplier_response_raw TEXT')
+              console.log('已添加 supplier_response_raw 列到 redemption_codes 表')
+              saveDatabase()
+            }
+
+            if (!redemptionColumns.includes('supplier_redeemed_at')) {
+              database.run('ALTER TABLE redemption_codes ADD COLUMN supplier_redeemed_at DATETIME')
+              console.log('已添加 supplier_redeemed_at 列到 redemption_codes 表')
+              saveDatabase()
+            }
+
             database.run(
               `UPDATE redemption_codes SET channel = ? WHERE channel IS NULL OR channel = ''`,
               [DEFAULT_CHANNEL],
@@ -2187,6 +2299,16 @@ export async function initDatabase() {
             )
             database.run(
               `UPDATE redemption_codes SET order_type = 'warranty' WHERE order_type IS NULL OR order_type = ''`
+            )
+            database.run(
+              `UPDATE redemption_codes
+               SET fulfillment_mode = 'internal_invite'
+               WHERE fulfillment_mode IS NULL OR fulfillment_mode = ''`
+            )
+            database.run(
+              `UPDATE redemption_codes
+               SET supplier_status = 'pending'
+               WHERE supplier_status IS NULL OR supplier_status = ''`
             )
             saveDatabase()
           }
@@ -2274,6 +2396,15 @@ export async function initDatabase() {
       channel TEXT DEFAULT '${DEFAULT_CHANNEL}',
       channel_name TEXT DEFAULT '${DEFAULT_CHANNEL_NAME}',
       order_type TEXT DEFAULT 'warranty',
+      fulfillment_mode TEXT DEFAULT 'internal_invite',
+      supplier_name TEXT,
+      supplier_type TEXT,
+      supplier_request_id TEXT,
+      supplier_status TEXT DEFAULT 'pending',
+      supplier_response_code TEXT,
+      supplier_response_message TEXT,
+      supplier_response_raw TEXT,
+      supplier_redeemed_at DATETIME,
       created_at DATETIME DEFAULT (DATETIME('now', 'localtime')),
       updated_at DATETIME DEFAULT (DATETIME('now', 'localtime')),
       reserved_for_uid TEXT,

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, nextTick, computed, onBeforeUnmount, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { authService, configService, redemptionCodeService, gptAccountService, type RedemptionCode, type GptAccount, type PurchaseOrderType, type SyncUserCountResponse, type ChatgptAccountInviteItem } from '@/services/api'
+import { authService, configService, redemptionCodeService, gptAccountService, type RedemptionCode, type GptAccount, type PurchaseOrderType, type SyncUserCountResponse, type ChatgptAccountInviteItem, type Channel } from '@/services/api'
 import { formatShanghaiDate } from '@/lib/datetime'
 import { useAppConfigStore } from '@/stores/appConfig'
 import {
@@ -27,7 +27,7 @@ import {
   DialogFooter,
 } from '@/components/ui/dialog'
 import { useToast } from '@/components/ui/toast'
-import { Search, Plus, Download, Trash2, ChevronLeft, ChevronRight, RefreshCcw, RefreshCw, Ticket, X } from 'lucide-vue-next'
+import { Search, Plus, Download, Upload, Trash2, ChevronLeft, ChevronRight, RefreshCcw, RefreshCw, Ticket, X, AlertTriangle } from 'lucide-vue-next'
 
 const router = useRouter()
 const route = useRoute()
@@ -57,6 +57,7 @@ const dateFormatOptions = computed(() => ({
 const showTextPopover = ref(false)
 const popoverText = ref('')
 const popoverPosition = ref({ x: 0, y: 0 })
+const runtimeChannels = ref<Channel[]>([])
 const channelOptions = ref<Array<{ value: string; label: string }>>([
   { value: 'common', label: '通用渠道' },
   { value: 'paypal', label: 'PayPal' },
@@ -66,12 +67,24 @@ const channelOptions = ref<Array<{ value: string; label: string }>>([
   { value: 'artisan-flow', label: 'ArtisanFlow' }
 ])
 const channelOptionsMap = computed(() => new Map(channelOptions.value.map(option => [option.value, option.label])))
+const channelConfigsByKey = computed(() => new Map(runtimeChannels.value.map(channel => [channel.key, channel])))
+const batchChannelOptions = computed(() => channelOptions.value.filter(option => channelConfigsByKey.value.get(option.value)?.redeemMode !== 'external-card'))
+const externalImportChannelOptions = computed(() => runtimeChannels.value
+  .filter(channel => channel.isActive && channel.redeemMode === 'external-card')
+  .map(channel => ({
+    value: channel.key,
+    label: channel.name || channel.key
+  })))
 const orderTypeOptions: { value: PurchaseOrderType; label: string }[] = [
   { value: 'warranty', label: '质保订单' },
   { value: 'no_warranty', label: '无质保订单' },
 ]
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const updatingChannelId = ref<number | null>(null)
+const showImportExternalDialog = ref(false)
+const importExternalChannel = ref('')
+const importExternalCodesText = ref('')
+const importingExternal = ref(false)
 let popoverTimer: ReturnType<typeof setTimeout> | null = null
 const { success: showSuccessToast, info: showInfoToast, warning: showWarningToast, error: showErrorToast } = useToast()
 
@@ -97,6 +110,75 @@ const isCodeAccountBanned = (code?: RedemptionCode | null) => {
   if (typeof code.accountIsBanned === 'boolean') return code.accountIsBanned
   return isAccountBanned(code.accountEmail)
 }
+
+const getChannelConfig = (channel?: string | null) => {
+  const normalized = String(channel || '').trim().toLowerCase()
+  if (!normalized) return null
+  return channelConfigsByKey.value.get(normalized) || null
+}
+
+const isExternalCode = (code?: RedemptionCode | null) => {
+  if (!code) return false
+  if (code.fulfillmentMode === 'external_api') return true
+  return getChannelConfig(code.channel)?.redeemMode === 'external-card'
+}
+
+const normalizeSupplierStatus = (value?: string | null, fallback: string = 'pending') => {
+  const normalized = String(value || '').trim().toLowerCase()
+  return normalized || fallback
+}
+
+const getCodeStatusLabel = (code: RedemptionCode) => {
+  if (!isExternalCode(code)) {
+    return code.isRedeemed ? '已使用' : '未使用'
+  }
+
+  const status = normalizeSupplierStatus(code.supplierStatus, code.isRedeemed ? 'success' : 'pending')
+  if (status === 'processing') return '处理中'
+  if (status === 'success') return '已履约'
+  if (status === 'invalid') return '已失效'
+  if (status === 'failed') return '履约失败'
+  return '待兑换'
+}
+
+const getCodeStatusClass = (code: RedemptionCode) => {
+  if (!isExternalCode(code)) {
+    return code.isRedeemed
+      ? 'bg-gray-50 text-gray-500 border-gray-200'
+      : 'bg-green-50 text-green-700 border-green-200'
+  }
+
+  const status = normalizeSupplierStatus(code.supplierStatus, code.isRedeemed ? 'success' : 'pending')
+  if (status === 'processing') return 'bg-blue-50 text-blue-700 border-blue-200'
+  if (status === 'success') return 'bg-emerald-50 text-emerald-700 border-emerald-200'
+  if (status === 'invalid') return 'bg-red-50 text-red-700 border-red-200'
+  if (status === 'failed') return 'bg-amber-50 text-amber-700 border-amber-200'
+  return 'bg-slate-50 text-slate-600 border-slate-200'
+}
+
+const getSupplierSummary = (code?: RedemptionCode | null) => {
+  if (!code || !isExternalCode(code)) return ''
+  return String(code.supplierName || code.supplierType || '').trim() || '上游供应商'
+}
+
+const canReinviteCode = (code: RedemptionCode) => code.isRedeemed && !isExternalCode(code)
+const canRedeemCode = (code: RedemptionCode) => {
+  if (code.isRedeemed) return false
+  const supplierStatus = normalizeSupplierStatus(code.supplierStatus)
+  return supplierStatus !== 'invalid' && supplierStatus !== 'processing'
+}
+const currentRedeemIsExternal = computed(() => isExternalCode(redeemTargetCode.value))
+const redeemDialogTitle = computed(() => currentRedeemIsExternal.value ? '执行上游兑换' : '发送兑换邀请')
+const redeemDialogActionLabel = computed(() => (
+  redeeming.value
+    ? (currentRedeemIsExternal.value ? '执行中...' : '发送中...')
+    : (currentRedeemIsExternal.value ? '确认兑换' : '确认发送')
+))
+const redeemEmailHelperText = computed(() => (
+  currentRedeemIsExternal.value
+    ? '将把该邮箱直接提交给上游履约接口。'
+    : '将向该邮箱发送 ChatGPT 成员邀请链接。'
+))
 
 // 同步相关状态（参考账号管理的同步按钮交互）
 const syncingAccountId = ref<number | null>(null)
@@ -254,6 +336,8 @@ const loadChannels = async () => {
   try {
     const runtime = await configService.getRuntimeConfig()
     const channels = Array.isArray(runtime.channels) ? runtime.channels : []
+    runtimeChannels.value = channels
+    appConfigStore.channels = channels
     if (!channels.length) return
 
     channelOptions.value = channels.map(channel => ({
@@ -261,8 +345,11 @@ const loadChannels = async () => {
       label: channel.isActive ? channel.name : `${channel.name}（停用）`
     }))
 
-    if (!channelOptions.value.some(option => option.value === selectedBatchChannel.value)) {
-      selectedBatchChannel.value = channelOptions.value[0]?.value || 'common'
+    if (!batchChannelOptions.value.some(option => option.value === selectedBatchChannel.value)) {
+      selectedBatchChannel.value = batchChannelOptions.value[0]?.value || 'common'
+    }
+    if (!externalImportChannelOptions.value.some(option => option.value === importExternalChannel.value)) {
+      importExternalChannel.value = externalImportChannelOptions.value[0]?.value || ''
     }
   } catch (err) {
     console.warn('[RedemptionCodes] load channels failed', err)
@@ -387,7 +474,7 @@ const truncateText = (text?: string | null, maxLength: number = 20) => {
 const openBatchDialog = () => {
   batchCount.value = 10
   selectedAccountEmail.value = accounts.value.length > 0 ? (accounts.value[0]?.email || '') : ''
-  selectedBatchChannel.value = 'common'
+  selectedBatchChannel.value = batchChannelOptions.value[0]?.value || 'common'
   showBatchDialog.value = true
 }
 
@@ -395,7 +482,56 @@ const closeBatchDialog = () => {
   showBatchDialog.value = false
   batchCount.value = 10
   selectedAccountEmail.value = ''
-  selectedBatchChannel.value = 'common'
+  selectedBatchChannel.value = batchChannelOptions.value[0]?.value || 'common'
+}
+
+const openImportExternalDialog = () => {
+  const firstExternalChannel = externalImportChannelOptions.value[0]
+  if (!firstExternalChannel) {
+    showWarningToast('暂无 external-card 渠道，请先到系统设置中启用')
+    return
+  }
+  importExternalChannel.value = firstExternalChannel.value
+  importExternalCodesText.value = ''
+  showImportExternalDialog.value = true
+}
+
+const closeImportExternalDialog = () => {
+  showImportExternalDialog.value = false
+  importExternalChannel.value = externalImportChannelOptions.value[0]?.value || ''
+  importExternalCodesText.value = ''
+  importingExternal.value = false
+}
+
+const handleImportExternal = async () => {
+  if (!importExternalChannel.value) {
+    showWarningToast('请选择 external-card 渠道')
+    return
+  }
+  if (!importExternalCodesText.value.trim()) {
+    showWarningToast('请输入要导入的卡密')
+    return
+  }
+
+  importingExternal.value = true
+  try {
+    const result = await redemptionCodeService.importExternal({
+      channel: importExternalChannel.value,
+      codesText: importExternalCodesText.value
+    })
+    await loadCodes()
+    closeImportExternalDialog()
+
+    if (result.duplicates > 0) {
+      showInfoToast(`成功导入 ${result.imported} 个，重复 ${result.duplicates} 个`)
+      return
+    }
+    showSuccessToast(result.message || `成功导入 ${result.imported} 个外部卡密`)
+  } catch (err: any) {
+    showErrorToast(err.response?.data?.error || '导入外部卡密失败')
+  } finally {
+    importingExternal.value = false
+  }
 }
 
 const handleBatchCreate = async () => {
@@ -406,6 +542,10 @@ const handleBatchCreate = async () => {
 
   if (!selectedAccountEmail.value) {
     error.value = '请选择所属账号'
+    return
+  }
+  if (!selectedBatchChannel.value) {
+    error.value = '请选择渠道'
     return
   }
 
@@ -657,26 +797,11 @@ const handleRedeemInvite = async () => {
       orderType: redeemOrderType.value
     })
 
-    const successMessage = response.data?.message || '兑换成功，邀请已发送'
+    const successMessage = response.data?.data?.message
+      || response.data?.message
+      || (currentRedeemIsExternal.value ? '上游兑换成功' : '兑换成功，邀请已发送')
     showSuccessToast(successMessage)
-
-    const updatedAt = new Date().toISOString()
-    const updatedCode = {
-      ...redeemTargetCode.value,
-      isRedeemed: true,
-      redeemedBy: email,
-      redeemedAt: updatedAt,
-      orderType: redeemOrderType.value
-    }
-
-    redeemTargetCode.value = updatedCode
-
-    const index = codes.value.findIndex(code => code.id === updatedCode.id)
-    if (index !== -1) {
-      codes.value[index] = updatedCode
-      codes.value = [...codes.value]
-    }
-
+    await loadCodes()
     closeRedeemDialog()
   } catch (err: any) {
     const message = err.response?.data?.message || err.response?.data?.error || '兑换失败，请稍后再试'
@@ -888,6 +1013,10 @@ const handleInviteSubmit = async () => {
             <Download class="mr-2 h-4 w-4" />
             导出
           </Button>
+          <Button @click="openImportExternalDialog" variant="outline" class="h-10 bg-white border-gray-200">
+            <Upload class="mr-2 h-4 w-4" />
+            导入外部卡密
+          </Button>
           <Button @click="openBatchDialog" class="h-10 bg-black hover:bg-gray-800 text-white rounded-xl shadow-lg shadow-black/10">
             <Plus class="mr-2 h-4 w-4" />
             批量生成
@@ -1011,7 +1140,7 @@ const handleInviteSubmit = async () => {
                  </td>
                 <td class="px-6 py-5">
                   <div class="flex items-center gap-2">
-                    <span 
+                    <span
                        class="font-mono text-sm font-medium text-gray-900 bg-gray-100 px-2 py-1 rounded cursor-pointer hover:bg-gray-200 transition-colors"
                        @click="copyToClipboard(code.code)"
                     >
@@ -1024,12 +1153,15 @@ const handleInviteSubmit = async () => {
                         已绑定
                       </span>
                   </div>
+                  <p v-if="getSupplierSummary(code)" class="mt-1 text-xs text-gray-400">
+                    {{ getSupplierSummary(code) }}
+                  </p>
                 </td>
                 <td class="px-6 py-5 text-center">
                   <span class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold border"
-                    :class="code.isRedeemed ? 'bg-gray-50 text-gray-500 border-gray-200' : 'bg-green-50 text-green-700 border-green-200'"
+                    :class="getCodeStatusClass(code)"
                   >
-                    {{ code.isRedeemed ? '已使用' : '未使用' }}
+                    {{ getCodeStatusLabel(code) }}
                   </span>
                 </td>
                 <td class="px-6 py-5">
@@ -1088,7 +1220,7 @@ const handleInviteSubmit = async () => {
                         待兑换
                       </span>
                       <span
-                        v-else-if="code.isRedeemed"
+                        v-else-if="code.isRedeemed && !isExternalCode(code)"
                         class="inline-flex items-center gap-1 rounded-full bg-blue-50 px-2 py-0.5 text-xs font-medium text-blue-600"
                       >
                         {{ code.orderType === 'no_warranty' ? '无质保' : (code.orderType === 'anti_ban' ? '防封禁' : '质保') }}
@@ -1100,7 +1232,7 @@ const handleInviteSubmit = async () => {
 	                  <div class="flex items-center justify-end gap-1">
 	                    <!-- Reinvite -->
 	                    <Button
-	                      v-if="code.isRedeemed"
+	                      v-if="canReinviteCode(code)"
 	                      size="icon"
 	                      variant="ghost"
 	                      class="h-8 w-8 text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg"
@@ -1112,12 +1244,12 @@ const handleInviteSubmit = async () => {
 	                    </Button>
 	                    <!-- Redeem -->
 	                    <Button
-	                      v-else
+	                      v-else-if="canRedeemCode(code)"
 	                      size="icon"
 	                      variant="ghost"
 	                      class="h-8 w-8 text-gray-400 hover:text-green-600 hover:bg-green-50 rounded-lg"
 	                      @click="openRedeemDialog(code)"
-	                      title="发起兑换"
+	                      :title="isExternalCode(code) ? '执行上游兑换' : '发起兑换'"
 	                    >
 	                      <Ticket class="w-4 h-4" />
 	                    </Button>
@@ -1158,13 +1290,16 @@ const handleInviteSubmit = async () => {
                    </span>
                 </div>
                 <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-semibold border"
-                   :class="code.isRedeemed ? 'bg-gray-50 text-gray-500 border-gray-200' : 'bg-green-50 text-green-700 border-green-200'"
+                   :class="getCodeStatusClass(code)"
                 >
-                   {{ code.isRedeemed ? '已使用' : '未使用' }}
+                   {{ getCodeStatusLabel(code) }}
                 </span>
              </div>
 
              <div class="space-y-3 mb-4">
+                <div v-if="getSupplierSummary(code)" class="text-xs text-gray-400">
+                  {{ getSupplierSummary(code) }}
+                </div>
                 <div class="grid grid-cols-2 gap-4">
                    <div>
                       <p class="text-xs text-gray-400 mb-1">渠道</p>
@@ -1228,7 +1363,7 @@ const handleInviteSubmit = async () => {
                       {{ getRedeemerDisplay(code) || '-' }}
                    </p>
                    <span
-                      v-if="code.isRedeemed"
+                      v-if="code.isRedeemed && !isExternalCode(code)"
                       class="inline-flex items-center gap-1 rounded-full bg-blue-50 px-2 py-0.5 text-[10px] font-medium text-blue-600 mt-2"
                    >
                       {{ code.orderType === 'no_warranty' ? '无质保' : (code.orderType === 'anti_ban' ? '防封禁' : '质保') }}
@@ -1243,7 +1378,7 @@ const handleInviteSubmit = async () => {
 
 	             <div class="flex items-center justify-end gap-2 pt-2 border-t border-gray-50">
 	                <Button
-	                   v-if="code.isRedeemed"
+	                   v-if="canReinviteCode(code)"
 	                   size="sm"
 	                   variant="outline"
 	                   class="h-9 text-xs border-blue-200 text-blue-600 hover:bg-blue-50"
@@ -1254,7 +1389,7 @@ const handleInviteSubmit = async () => {
 	                   重新邀请
 	                </Button>
 	                <Button
-	                   v-else
+	                   v-else-if="canRedeemCode(code)"
 	                   size="sm"
 	                   variant="outline"
 	                   class="h-9 text-xs border-green-200 text-green-600 hover:bg-green-50"
@@ -1512,12 +1647,12 @@ const handleInviteSubmit = async () => {
 
            <div class="space-y-2">
               <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">渠道</Label>
-              <Select v-model="selectedBatchChannel">
+                  <Select v-model="selectedBatchChannel">
                 <SelectTrigger class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500">
                   <SelectValue placeholder="选择渠道" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem v-for="channel in channelOptions" :key="channel.value" :value="channel.value">
+                  <SelectItem v-for="channel in batchChannelOptions" :key="channel.value" :value="channel.value">
                     {{ channel.label }}
                   </SelectItem>
                 </SelectContent>
@@ -1545,11 +1680,55 @@ const handleInviteSubmit = async () => {
       </DialogContent>
     </Dialog>
 
+    <!-- Import External Dialog -->
+    <Dialog v-model:open="showImportExternalDialog">
+      <DialogContent class="sm:max-w-[560px] p-0 overflow-hidden bg-white border-none shadow-2xl rounded-3xl">
+        <DialogHeader class="px-8 pt-8 pb-4">
+          <DialogTitle class="text-2xl font-bold text-gray-900">导入外部卡密</DialogTitle>
+        </DialogHeader>
+
+        <div class="px-8 pb-8 space-y-6">
+          <div class="space-y-2">
+            <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">目标渠道</Label>
+            <Select v-model="importExternalChannel">
+              <SelectTrigger class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500">
+                <SelectValue placeholder="选择 external-card 渠道" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem v-for="channel in externalImportChannelOptions" :key="channel.value" :value="channel.value">
+                  {{ channel.label }}
+                </SelectItem>
+              </SelectContent>
+            </Select>
+            <p class="text-xs text-gray-400">仅展示兑换模式为 `external-card` 的渠道。</p>
+          </div>
+
+          <div class="space-y-2">
+            <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">卡密列表</Label>
+            <textarea
+              v-model="importExternalCodesText"
+              rows="10"
+              placeholder="每行一个卡密，支持任意非空字符串"
+              class="w-full rounded-2xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm font-mono text-gray-900 outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+            ></textarea>
+            <p class="text-xs text-gray-400">重复卡密会自动跳过并在导入结果中提示。</p>
+          </div>
+        </div>
+
+        <DialogFooter class="px-8 pb-8 pt-0">
+          <Button variant="ghost" @click="closeImportExternalDialog" class="rounded-xl text-gray-500">取消</Button>
+          <Button @click="handleImportExternal" :disabled="importingExternal" class="rounded-xl bg-blue-600 text-white shadow-lg shadow-blue-200 hover:bg-blue-700 px-6">
+            {{ importingExternal ? '导入中...' : '开始导入' }}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
     <!-- Redeem Dialog -->
     <Dialog v-model:open="showRedeemDialog">
       <DialogContent class="sm:max-w-[500px] p-0 overflow-hidden bg-white border-none shadow-2xl rounded-3xl">
         <DialogHeader class="px-8 pt-8 pb-4">
-          <DialogTitle class="text-2xl font-bold text-gray-900">发送兑换邀请</DialogTitle>
+          <DialogTitle class="text-2xl font-bold text-gray-900">{{ redeemDialogTitle }}</DialogTitle>
         </DialogHeader>
         
         <div class="px-8 pb-8 space-y-6">
@@ -1559,17 +1738,17 @@ const handleInviteSubmit = async () => {
                  <span class="font-mono font-medium text-blue-900">{{ redeemTargetCode.code }}</span>
               </div>
               <div class="flex justify-between items-center">
-                 <span class="text-xs text-blue-600 font-semibold uppercase">Account</span>
+                 <span class="text-xs text-blue-600 font-semibold uppercase">{{ currentRedeemIsExternal ? 'Supplier' : 'Account' }}</span>
                  <span
                    class="font-medium"
-                   :class="isCodeAccountBanned(redeemTargetCode) ? 'text-red-600' : 'text-blue-900'"
+                   :class="!currentRedeemIsExternal && isCodeAccountBanned(redeemTargetCode) ? 'text-red-600' : 'text-blue-900'"
                  >
-                   {{ redeemTargetCode.accountEmail || '未指定' }}
+                   {{ currentRedeemIsExternal ? (getSupplierSummary(redeemTargetCode) || '未指定') : (redeemTargetCode.accountEmail || '未指定') }}
                  </span>
               </div>
            </div>
 
-           <div class="space-y-2">
+           <div v-if="!currentRedeemIsExternal" class="space-y-2">
               <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">订单类型</Label>
               <Select v-model="redeemOrderType">
                 <SelectTrigger class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500">
@@ -1585,21 +1764,21 @@ const handleInviteSubmit = async () => {
            </div>
 
            <div class="space-y-2">
-              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">受邀邮箱</Label>
+              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">{{ currentRedeemIsExternal ? '目标邮箱' : '受邀邮箱' }}</Label>
               <Input
                 v-model="redeemEmail"
                 type="email"
                 placeholder="name@example.com"
                 class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500"
               />
-              <p class="text-xs text-gray-400">将向该邮箱发送 ChatGPT 成员邀请链接。</p>
+              <p class="text-xs text-gray-400">{{ redeemEmailHelperText }}</p>
            </div>
         </div>
 
         <DialogFooter class="px-8 pb-8 pt-0">
            <Button variant="ghost" @click="closeRedeemDialog" class="rounded-xl text-gray-500">取消</Button>
            <Button @click="handleRedeemInvite" :disabled="redeeming" class="rounded-xl bg-blue-600 text-white shadow-lg shadow-blue-200 hover:bg-blue-700 px-6">
-             {{ redeeming ? '发送中...' : '确认发送' }}
+             {{ redeemDialogActionLabel }}
            </Button>
         </DialogFooter>
       </DialogContent>

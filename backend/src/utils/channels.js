@@ -11,6 +11,12 @@ export const normalizeChannelKey = (value, fallback = 'common') => {
   return normalized ? normalized : String(fallback || 'common').trim().toLowerCase() || 'common'
 }
 
+const normalizeProviderType = (value) => {
+  const normalized = String(value ?? '').trim().toLowerCase()
+  if (normalized === 'legacy-http') return 'custom-http'
+  return normalized || 'local'
+}
+
 const mapChannelRow = (row) => {
   if (!row) return null
   const key = normalizeChannelKey(row[0], '')
@@ -18,20 +24,24 @@ const mapChannelRow = (row) => {
   return {
     key,
     name: String(row[1] ?? '').trim(),
-    redeemMode: String(row[2] ?? 'code').trim() || 'code',
-    allowCommonFallback: Number(row[3] || 0) === 1,
-    isActive: Number(row[4] ?? 1) !== 0,
-    isBuiltin: Number(row[5] || 0) === 1,
-    sortOrder: Number(row[6] || 0) || 0,
-    createdAt: row[7] || null,
-    updatedAt: row[8] || null,
+    redeemMode: (() => {
+      const redeemMode = String(row[2] ?? 'code').trim().toLowerCase()
+      return redeemMode === 'api' ? 'code' : (redeemMode || 'code')
+    })(),
+    providerType: normalizeProviderType(row[3]),
+    allowCommonFallback: Number(row[4] || 0) === 1,
+    isActive: Number(row[5] ?? 1) !== 0,
+    isBuiltin: Number(row[6] || 0) === 1,
+    sortOrder: Number(row[7] || 0) || 0,
+    createdAt: row[8] || null,
+    updatedAt: row[9] || null,
   }
 }
 
 const loadChannelsFromDb = (database) => {
   const result = database.exec(
     `
-      SELECT key, name, redeem_mode, allow_common_fallback, is_active, is_builtin, sort_order, created_at, updated_at
+      SELECT key, name, redeem_mode, provider_type, allow_common_fallback, is_active, is_builtin, sort_order, created_at, updated_at
       FROM channels
       ORDER BY sort_order ASC, id ASC
     `
@@ -89,4 +99,3 @@ export async function getChannelByKey(db, key, { forceRefresh = false } = {}) {
   const { byKey } = await getChannels(db, { forceRefresh })
   return byKey.get(normalized) || null
 }
-

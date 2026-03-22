@@ -14,6 +14,8 @@ import { safeInsertPointsLedgerEntry } from '../utils/points-ledger.js'
 import { getZpaySettings } from '../utils/zpay-settings.js'
 import { sendTelegramBotNotification } from '../services/telegram-notifier.js'
 import { requireFeatureEnabled } from '../middleware/feature-flags.js'
+import { getUpstreamSettings } from '../utils/upstream-settings.js'
+import { getUpstreamProviderReadiness } from '../services/upstream-provider.js'
 
 const router = express.Router()
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-this-in-production'
@@ -137,6 +139,8 @@ const ORDER_TYPE_SET = new Set([ORDER_TYPE_WARRANTY, ORDER_TYPE_NO_WARRANTY, ORD
 const NO_WARRANTY_REWARD_POINTS = 1
 const CODE_CHANNEL_COMMON = 'common'
 const CODE_CHANNEL_PAYPAL = 'paypal'
+const SUPPLIER_STATUS_INVALID = 'invalid'
+const SUPPLIER_STATUS_PROCESSING = 'processing'
 
 const parseOrderType = (value) => {
   const normalized = String(value || '').trim().toLowerCase()
@@ -226,6 +230,32 @@ const parseProductCodeChannels = (product, channelsByKey) => {
     resolved.push(key)
   }
   return resolved
+}
+
+const isExternalCardChannel = (channelConfig) => (
+  String(channelConfig?.redeemMode || '').trim().toLowerCase() === 'external-card'
+)
+
+const getPurchaseChannelAvailability = ({ channelConfig, upstreamSettings }) => {
+  if (!channelConfig?.isActive) {
+    return {
+      ready: false,
+      message: '渠道已停用'
+    }
+  }
+
+  if (!isExternalCardChannel(channelConfig)) {
+    return {
+      ready: true,
+      message: ''
+    }
+  }
+
+  const readiness = getUpstreamProviderReadiness(upstreamSettings, channelConfig?.providerType)
+  return {
+    ready: Boolean(readiness.ready),
+    message: readiness.message || '当前商品暂不可售，请联系管理员'
+  }
 }
 
 const getPurchasePlan = (orderType) => {
@@ -440,7 +470,7 @@ const cleanupExpiredOrders = (db, { expireMinutes }) => {
   return released
 }
 
-const getTodayAvailableCodeCount = (db, { channel } = {}) => {
+const getInternalAvailableCodeCount = (db, { channel } = {}) => {
   const resolvedChannel = String(channel || CODE_CHANNEL_COMMON).trim().toLowerCase() || CODE_CHANNEL_COMMON
   const result = db.exec(
     `
@@ -461,7 +491,30 @@ const getTodayAvailableCodeCount = (db, { channel } = {}) => {
   return Number(result[0]?.values?.[0]?.[0] || 0)
 }
 
-const reserveTodayCode = (db, { orderNo, email, channel } = {}) => {
+const getExternalAvailableCodeCount = (db, { channel } = {}) => {
+  const resolvedChannel = String(channel || CODE_CHANNEL_COMMON).trim().toLowerCase() || CODE_CHANNEL_COMMON
+  const result = db.exec(
+    `
+      SELECT COUNT(*)
+      FROM redemption_codes rc
+      WHERE rc.is_redeemed = 0
+        AND COALESCE(NULLIF(lower(trim(rc.channel)), ''), 'common') = ?
+        AND (rc.reserved_for_order_no IS NULL OR rc.reserved_for_order_no = '')
+        AND (rc.reserved_for_entry_id IS NULL OR rc.reserved_for_entry_id = 0)
+        AND COALESCE(NULLIF(lower(trim(rc.supplier_status)), ''), 'pending') NOT IN (?, ?)
+    `,
+    [resolvedChannel, SUPPLIER_STATUS_INVALID, SUPPLIER_STATUS_PROCESSING]
+  )
+  return Number(result[0]?.values?.[0]?.[0] || 0)
+}
+
+const getAvailableCodeCount = (db, { channel, channelConfig } = {}) => (
+  isExternalCardChannel(channelConfig)
+    ? getExternalAvailableCodeCount(db, { channel })
+    : getInternalAvailableCodeCount(db, { channel })
+)
+
+const reserveInternalCode = (db, { orderNo, email, channel } = {}) => {
   const resolvedChannel = String(channel || CODE_CHANNEL_COMMON).trim().toLowerCase() || CODE_CHANNEL_COMMON
   const row = db.exec(
     `
@@ -501,6 +554,50 @@ const reserveTodayCode = (db, { orderNo, email, channel } = {}) => {
 
   return { codeId, code, accountEmail }
 }
+
+const reserveExternalCode = (db, { orderNo, email, channel } = {}) => {
+  const resolvedChannel = String(channel || CODE_CHANNEL_COMMON).trim().toLowerCase() || CODE_CHANNEL_COMMON
+  const row = db.exec(
+    `
+      SELECT rc.id, rc.code, rc.account_email
+      FROM redemption_codes rc
+      WHERE rc.is_redeemed = 0
+        AND COALESCE(NULLIF(lower(trim(rc.channel)), ''), 'common') = ?
+        AND (rc.reserved_for_order_no IS NULL OR rc.reserved_for_order_no = '')
+        AND (rc.reserved_for_entry_id IS NULL OR rc.reserved_for_entry_id = 0)
+        AND COALESCE(NULLIF(lower(trim(rc.supplier_status)), ''), 'pending') NOT IN (?, ?)
+      ORDER BY rc.created_at ASC, rc.id ASC
+      LIMIT 1
+    `,
+    [resolvedChannel, SUPPLIER_STATUS_INVALID, SUPPLIER_STATUS_PROCESSING]
+  )[0]?.values?.[0]
+
+  if (!row) return null
+  const [codeId, code, accountEmail] = row
+
+  db.run(
+    `
+      UPDATE redemption_codes
+      SET reserved_for_order_no = ?,
+          reserved_for_order_email = ?,
+          reserved_at = DATETIME('now', 'localtime'),
+          updated_at = DATETIME('now', 'localtime')
+      WHERE id = ?
+        AND is_redeemed = 0
+        AND (reserved_for_order_no IS NULL OR reserved_for_order_no = '')
+        AND COALESCE(NULLIF(lower(trim(supplier_status)), ''), 'pending') NOT IN (?, ?)
+    `,
+    [orderNo, email, codeId, SUPPLIER_STATUS_INVALID, SUPPLIER_STATUS_PROCESSING]
+  )
+
+  return { codeId, code, accountEmail }
+}
+
+const reserveAvailableCode = (db, { orderNo, email, channel, channelConfig } = {}) => (
+  isExternalCardChannel(channelConfig)
+    ? reserveExternalCode(db, { orderNo, email, channel })
+    : reserveInternalCode(db, { orderNo, email, channel })
+)
 
 const resolvePurchaseOrderNoByZpayTradeNo = (db, tradeNo) => {
   if (!db) return ''
@@ -904,7 +1001,10 @@ const handlePaidOrder = async (db, orderNo, { payType, tradeNo, paidAt, notifyPa
               WHERE order_no = ?
             `,
             [
-              redemption?.data?.inviteStatus || null,
+              redemption?.data?.inviteStatus
+                || (redemption?.data?.fulfillmentMode === 'external_api'
+                  ? String(redemption?.data?.message || '兑换成功，权益已开通').trim()
+                  : null),
               redemption?.data?.accountEmail || null,
               redemption?.data?.userCount != null ? Number(redemption.data.userCount) : null,
               orderNo
@@ -914,11 +1014,26 @@ const handlePaidOrder = async (db, orderNo, { payType, tradeNo, paidAt, notifyPa
         } catch (error) {
           let resolvedError = error
           if (error instanceof RedemptionError && error.message === '该兑换码已被使用') {
-            const codeResult = db.exec(
-              `SELECT redeemed_by, redeemed_at FROM redemption_codes WHERE code = ? LIMIT 1`,
-              [String(updatedOrder.code).trim().toUpperCase()]
-            )
-            const row = codeResult[0]?.values?.[0]
+            const rawCode = String(updatedOrder.code || '').trim()
+            let row = null
+            if (rawCode) {
+              const exactResult = db.exec(
+                `SELECT redeemed_by, redeemed_at FROM redemption_codes WHERE code = ? LIMIT 1`,
+                [rawCode]
+              )
+              row = exactResult[0]?.values?.[0] || null
+
+              if (!row) {
+                const upperCode = rawCode.toUpperCase()
+                if (upperCode !== rawCode) {
+                  const upperResult = db.exec(
+                    `SELECT redeemed_by, redeemed_at FROM redemption_codes WHERE code = ? LIMIT 1`,
+                    [upperCode]
+                  )
+                  row = upperResult[0]?.values?.[0] || null
+                }
+              }
+            }
             const redeemedBy = row?.[0] ? String(row[0]).trim() : ''
             const redeemedAt = row?.[1] || null
             if (redeemedBy && normalizeEmail(redeemedBy) === normalizeEmail(updatedOrder.email)) {
@@ -1092,6 +1207,7 @@ router.get('/meta', async (req, res) => {
     })
     const products = await listPurchaseProducts(db, { activeOnly: true })
     const { byKey: channelsByKey } = await getChannels(db)
+    const upstreamSettings = await getUpstreamSettings(db)
 
     const responsePlans = []
     for (const product of products) {
@@ -1103,7 +1219,16 @@ router.get('/meta', async (req, res) => {
       const codeChannels = parseProductCodeChannels(product, channelsByKey)
       let availableCount = 0
       for (const channel of codeChannels) {
-        availableCount += getTodayAvailableCodeCount(db, { channel })
+        const channelConfig = channelsByKey.get(channel) || null
+        const availability = getPurchaseChannelAvailability({
+          channelConfig,
+          upstreamSettings
+        })
+        if (!availability.ready) continue
+        availableCount += getAvailableCodeCount(db, {
+          channel,
+          channelConfig
+        })
       }
 
       const isNoWarranty = orderType === ORDER_TYPE_NO_WARRANTY
@@ -1120,9 +1245,23 @@ router.get('/meta', async (req, res) => {
     }
 
     if (!responsePlans.length) {
+      const allConfiguredProducts = products.length
+        ? products
+        : await listPurchaseProducts(db, { activeOnly: false })
+
+      if (allConfiguredProducts.length > 0) {
+        return res.json({
+          plans: [],
+          productName: '',
+          amount: '',
+          serviceDays: 30,
+          availableCount: 0
+        })
+      }
+
       const legacy = getPurchasePlans()
-      const legacyWarrantyCount = getTodayAvailableCodeCount(db, { channel: CODE_CHANNEL_PAYPAL })
-      const legacyNoWarrantyCount = getTodayAvailableCodeCount(db, { channel: CODE_CHANNEL_COMMON })
+      const legacyWarrantyCount = getAvailableCodeCount(db, { channel: CODE_CHANNEL_PAYPAL })
+      const legacyNoWarrantyCount = getAvailableCodeCount(db, { channel: CODE_CHANNEL_COMMON })
       return res.json({
         plans: [
           {
@@ -1197,6 +1336,7 @@ router.post('/orders', async (req, res) => {
       cleanupExpiredOrders(db, { expireMinutes: getPurchaseOrderExpireMinutes() })
 
       const { byKey: channelsByKey } = await getChannels(db)
+      const upstreamSettings = await getUpstreamSettings(db)
       let product = null
 
       if (productKey) {
@@ -1226,15 +1366,31 @@ router.post('/orders', async (req, res) => {
 
       let reserved = null
       let lockedChannel = ''
+      let saleReadyChannelCount = 0
       for (const channel of candidateChannels) {
-        reserved = reserveTodayCode(db, { orderNo, email, channel })
+        const channelConfig = channelsByKey.get(channel) || null
+        const availability = getPurchaseChannelAvailability({
+          channelConfig,
+          upstreamSettings
+        })
+        if (!availability.ready) continue
+        saleReadyChannelCount += 1
+        reserved = reserveAvailableCode(db, {
+          orderNo,
+          email,
+          channel,
+          channelConfig
+        })
         if (reserved) {
           lockedChannel = channel
           break
         }
       }
+      if (saleReadyChannelCount === 0) {
+        return { ok: false, status: 503, error: '当前商品暂不可售，请联系管理员' }
+      }
       if (!reserved) {
-        return { ok: false, status: 409, error: '今日库存不足，请稍后再试' }
+        return { ok: false, status: 409, error: '可用库存不足，请稍后再试' }
       }
 
       db.run(

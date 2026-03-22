@@ -100,6 +100,13 @@
             <div class="text-[13px] text-[#86868b]">
               退款仅支持后台处理，如需退款请联系管理员。
             </div>
+
+            <div
+              v-if="orderFulfillmentHint"
+              class="rounded-2xl border border-emerald-200/70 bg-emerald-50/70 p-4 text-sm text-emerald-700"
+            >
+              {{ orderFulfillmentHint }}
+            </div>
           </div>
         </div>
       </AppleCard>
@@ -136,6 +143,21 @@ const statusLabel = (status?: string) => {
   if (status === 'pending_payment') return '待支付'
   return status || '未知'
 }
+
+const orderFulfillmentHint = computed(() => {
+  const order = result.value?.order
+  if (!order || order.status !== 'paid') return ''
+  if (order.redeemError) {
+    return `支付成功，但自动处理失败：${order.redeemError}`
+  }
+  if (order.inviteStatus) {
+    return `支付成功，${order.inviteStatus}`
+  }
+  if (order.emailSentAt) {
+    return '支付成功，订单信息已发送至邮箱。'
+  }
+  return '支付成功，订单正在处理中。'
+})
 
 const handleQuery = async () => {
   errorMessage.value = ''

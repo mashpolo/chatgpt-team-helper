@@ -32,6 +32,7 @@ import { requireFeatureEnabled } from '../middleware/feature-flags.js'
 import { getChannels, normalizeChannelKey } from '../utils/channels.js'
 import { resolveOrderDeadlineMs, selectRecoveryCode } from '../services/account-recovery.js'
 import { getAccountRecoverySettings } from '../utils/account-recovery-settings.js'
+import { redeemViaUpstreamProvider } from '../services/upstream-provider.js'
 
 const router = express.Router()
 
@@ -199,6 +200,8 @@ const mapCodeRow = (row, channelsByKey) => {
   const channelValue = normalizeChannel(row[6], 'common')
   const storedChannelName = row[7] == null ? '' : String(row[7]).trim()
   const channelName = storedChannelName || resolveChannelNameFromRegistry(channelsByKey, channelValue) || channelValue
+  const hasAccountIsBannedColumn = row.length >= 26
+  const supplierBaseIndex = hasAccountIsBannedColumn ? 18 : 17
   return {
     id: row[0],
     code: row[1],
@@ -218,13 +221,28 @@ const mapCodeRow = (row, channelsByKey) => {
     reservedForOrderEmail: row.length > 15 ? row[15] || null : null,
     orderType: row.length > 16 ? row[16] || null : null,
     // Optional: may be present when list API joins gpt_accounts.
-    accountIsBanned: row.length > 17 ? toInt(row[17], 0) === 1 : undefined
+    accountIsBanned: hasAccountIsBannedColumn ? toInt(row[17], 0) === 1 : undefined,
+    fulfillmentMode: row.length > supplierBaseIndex ? String(row[supplierBaseIndex] ?? '').trim() || 'internal_invite' : 'internal_invite',
+    supplierName: row.length > supplierBaseIndex + 1 ? row[supplierBaseIndex + 1] || null : null,
+    supplierType: row.length > supplierBaseIndex + 2 ? row[supplierBaseIndex + 2] || null : null,
+    supplierRequestId: row.length > supplierBaseIndex + 3 ? row[supplierBaseIndex + 3] || null : null,
+    supplierStatus: row.length > supplierBaseIndex + 4 ? String(row[supplierBaseIndex + 4] ?? '').trim() || 'pending' : 'pending',
+    supplierResponseCode: row.length > supplierBaseIndex + 5 ? row[supplierBaseIndex + 5] || null : null,
+    supplierResponseMessage: row.length > supplierBaseIndex + 6 ? row[supplierBaseIndex + 6] || null : null,
+    supplierRedeemedAt: row.length > supplierBaseIndex + 7 ? row[supplierBaseIndex + 7] || null : null
   }
 }
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const CODE_REGEX = /^[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/
 const OUT_OF_STOCK_MESSAGE = '暂无可用兑换码，请联系管理员补货'
+const FULFILLMENT_MODE_INTERNAL = 'internal_invite'
+const FULFILLMENT_MODE_EXTERNAL = 'external_api'
+const SUPPLIER_STATUS_PENDING = 'pending'
+const SUPPLIER_STATUS_PROCESSING = 'processing'
+const SUPPLIER_STATUS_SUCCESS = 'success'
+const SUPPLIER_STATUS_INVALID = 'invalid'
+const SUPPLIER_STATUS_FAILED = 'failed'
 const extractEmailFromRedeemedBy = (redeemedBy) => {
   const raw = String(redeemedBy ?? '').trim()
   if (!raw) return ''
@@ -243,6 +261,8 @@ export class RedemptionError extends Error {
     this.payload = payload
   }
 }
+
+const isExternalCardRedeemMode = (channelConfig) => String(channelConfig?.redeemMode || '').trim().toLowerCase() === 'external-card'
 
 // 生成随机兑换码
 function generateRedemptionCode(length = 12) {
@@ -324,6 +344,199 @@ const recordAccountRecovery = (db, payload) => {
   )
 }
 
+const truncateSupplierPayload = (value, maxLength = 5000) => {
+  const raw = String(value || '')
+  return raw.length > maxLength ? raw.slice(0, maxLength) : raw
+}
+
+const buildExternalRedemptionResponse = ({ email, code, providerResult }) => ({
+  status: SUPPLIER_STATUS_SUCCESS,
+  fulfillmentMode: FULFILLMENT_MODE_EXTERNAL,
+  email,
+  code,
+  redeemedAt: providerResult.redeemedAt || new Date().toISOString(),
+  supplierStatus: providerResult.status,
+  supplierName: providerResult.supplierName || '',
+  message: providerResult.message || '兑换成功，权益已开通'
+})
+
+const reserveExternalSupplierCode = (db, codeId) => {
+  db.run(
+    `
+      UPDATE redemption_codes
+      SET fulfillment_mode = ?,
+          supplier_status = ?,
+          supplier_response_code = NULL,
+          supplier_response_message = NULL,
+          supplier_response_raw = NULL,
+          supplier_request_id = NULL,
+          updated_at = DATETIME('now', 'localtime')
+      WHERE id = ?
+        AND is_redeemed = 0
+        AND (
+          supplier_status IS NULL
+          OR supplier_status = ''
+          OR supplier_status IN (?, ?)
+        )
+    `,
+    [
+      FULFILLMENT_MODE_EXTERNAL,
+      SUPPLIER_STATUS_PROCESSING,
+      codeId,
+      SUPPLIER_STATUS_PENDING,
+      SUPPLIER_STATUS_FAILED,
+    ]
+  )
+  return typeof db.getRowsModified === 'function' ? db.getRowsModified() : 0
+}
+
+const updateExternalSupplierCodeResult = (db, codeId, values) => {
+  db.run(
+    `
+      UPDATE redemption_codes
+      SET is_redeemed = ?,
+          redeemed_at = ?,
+          redeemed_by = ?,
+          order_type = ?,
+          fulfillment_mode = ?,
+          supplier_name = ?,
+          supplier_type = ?,
+          supplier_request_id = ?,
+          supplier_status = ?,
+          supplier_response_code = ?,
+          supplier_response_message = ?,
+          supplier_response_raw = ?,
+          supplier_redeemed_at = ?,
+          updated_at = DATETIME('now', 'localtime')
+      WHERE id = ?
+    `,
+    [
+      values.isRedeemed ? 1 : 0,
+      values.redeemedAt || null,
+      values.redeemedBy || null,
+      values.orderType || ORDER_TYPE_WARRANTY,
+      values.fulfillmentMode || FULFILLMENT_MODE_EXTERNAL,
+      values.supplierName || null,
+      values.supplierType || null,
+      values.supplierRequestId || null,
+      values.supplierStatus || SUPPLIER_STATUS_PENDING,
+      values.supplierResponseCode || null,
+      values.supplierResponseMessage || null,
+      truncateSupplierPayload(values.supplierResponseRaw),
+      values.supplierRedeemedAt || null,
+      codeId,
+    ]
+  )
+}
+
+async function redeemExternalSupplierCode({
+  db,
+  codeRecord,
+  normalizedEmail,
+  requestedChannel,
+  requestedChannelConfig,
+  resolvedOrderType,
+}) {
+  const existingStatus = String(codeRecord.supplierStatus || SUPPLIER_STATUS_PENDING).trim().toLowerCase()
+  if (existingStatus === SUPPLIER_STATUS_INVALID) {
+    throw new RedemptionError(400, '该卡密已失效，请联系管理员', {
+      status: SUPPLIER_STATUS_INVALID,
+      fulfillmentMode: FULFILLMENT_MODE_EXTERNAL
+    })
+  }
+  if (existingStatus === SUPPLIER_STATUS_PROCESSING) {
+    throw new RedemptionError(409, '该卡密正在处理中，请稍后重试', {
+      status: SUPPLIER_STATUS_PROCESSING,
+      fulfillmentMode: FULFILLMENT_MODE_EXTERNAL
+    })
+  }
+
+  const reserved = reserveExternalSupplierCode(db, codeRecord.id)
+  if (reserved === 0) {
+    throw new RedemptionError(409, '该卡密正在处理中或已不可用，请刷新后重试', {
+      status: existingStatus || SUPPLIER_STATUS_PENDING,
+      fulfillmentMode: FULFILLMENT_MODE_EXTERNAL
+    })
+  }
+  saveDatabase()
+
+  const providerResult = await redeemViaUpstreamProvider(
+    {
+      email: normalizedEmail,
+      code: codeRecord.code,
+      channel: requestedChannel
+    },
+    {
+      providerType: requestedChannelConfig?.providerType
+    }
+  )
+
+  const supplierValues = {
+    fulfillmentMode: FULFILLMENT_MODE_EXTERNAL,
+    supplierName: providerResult.supplierName,
+    supplierType: providerResult.providerType,
+    supplierRequestId: providerResult.requestId,
+    supplierStatus: providerResult.status,
+    supplierResponseCode: providerResult.responseCode,
+    supplierResponseMessage: providerResult.message,
+    supplierResponseRaw: providerResult.responseRaw,
+  }
+
+  if (providerResult.ok && providerResult.status === SUPPLIER_STATUS_SUCCESS) {
+    const redeemedAt = providerResult.redeemedAt || new Date().toISOString()
+    updateExternalSupplierCodeResult(db, codeRecord.id, {
+      ...supplierValues,
+      isRedeemed: true,
+      redeemedAt,
+      redeemedBy: normalizedEmail,
+      orderType: resolvedOrderType,
+      supplierRedeemedAt: redeemedAt,
+    })
+    saveDatabase()
+
+    return {
+      data: buildExternalRedemptionResponse({
+        email: normalizedEmail,
+        code: codeRecord.code,
+        providerResult
+      }),
+      metadata: {
+        codeId: codeRecord.id,
+        code: codeRecord.code,
+        requestedChannel,
+        accountEmail: null,
+        accountId: null,
+        supplierStatus: providerResult.status,
+        supplierType: providerResult.providerType,
+        supplierRequestId: providerResult.requestId
+      }
+    }
+  }
+
+  updateExternalSupplierCodeResult(db, codeRecord.id, {
+    ...supplierValues,
+    isRedeemed: false,
+    redeemedAt: null,
+    redeemedBy: null,
+    orderType: resolvedOrderType,
+    supplierRedeemedAt: null,
+  })
+  saveDatabase()
+
+  throw new RedemptionError(
+    providerResult.status === SUPPLIER_STATUS_INVALID ? 400 : 503,
+    providerResult.message || '兑换失败，请稍后重试',
+    {
+      status: providerResult.status || SUPPLIER_STATUS_FAILED,
+      fulfillmentMode: FULFILLMENT_MODE_EXTERNAL,
+      retryable: Boolean(providerResult.retryable),
+      supplierName: providerResult.supplierName || '',
+      supplierType: providerResult.providerType || '',
+      supplierRequestId: providerResult.requestId || ''
+    }
+  )
+}
+
 export async function redeemCodeInternal({
   email,
   code,
@@ -344,13 +557,9 @@ export async function redeemCodeInternal({
     throw new RedemptionError(400, '请输入有效的邮箱地址')
   }
 
-  const sanitizedCode = (code || '').trim().toUpperCase()
-  if (!sanitizedCode) {
+  const rawCode = String(code || '').trim()
+  if (!rawCode) {
     throw new RedemptionError(400, '请输入兑换码')
-  }
-
-  if (!skipCodeFormatValidation && !CODE_REGEX.test(sanitizedCode)) {
-    throw new RedemptionError(400, '兑换码格式不正确（格式：XXXX-XXXX-XXXX）')
   }
 
   const requestedChannel = normalizeChannel(channel, 'common')
@@ -368,6 +577,14 @@ export async function redeemCodeInternal({
     throw new RedemptionError(403, '该渠道已停用')
   }
 
+  const sanitizedCode = isExternalCardRedeemMode(requestedChannelConfig)
+    ? rawCode
+    : rawCode.toUpperCase()
+
+  if (!skipCodeFormatValidation && !isExternalCardRedeemMode(requestedChannelConfig) && !CODE_REGEX.test(sanitizedCode)) {
+    throw new RedemptionError(400, '兑换码格式不正确（格式：XXXX-XXXX-XXXX）')
+  }
+
   if (requestedChannelConfig.redeemMode === 'linux-do' && !normalizedRedeemerUid) {
     throw new RedemptionError(400, 'Linux DO 渠道兑换需要填写论坛 UID')
   }
@@ -375,7 +592,9 @@ export async function redeemCodeInternal({
       SELECT id, code, is_redeemed, redeemed_at, redeemed_by,
              account_email, channel, channel_name, created_at, updated_at,
              reserved_for_uid, reserved_for_username, reserved_for_entry_id, reserved_at,
-             reserved_for_order_no, reserved_for_order_email, order_type
+             reserved_for_order_no, reserved_for_order_email, order_type,
+             fulfillment_mode, supplier_name, supplier_type, supplier_request_id,
+             supplier_status, supplier_response_code, supplier_response_message, supplier_redeemed_at
       FROM redemption_codes
       WHERE code = ?
     `, [sanitizedCode])
@@ -490,6 +709,17 @@ export async function redeemCodeInternal({
         throw new RedemptionError(403, '该兑换码已绑定购买邮箱，请使用下单邮箱兑换')
       }
     }
+  }
+
+  if (isExternalCardRedeemMode(requestedChannelConfig)) {
+    return redeemExternalSupplierCode({
+      db,
+      codeRecord,
+      normalizedEmail,
+      requestedChannel,
+      requestedChannelConfig,
+      resolvedOrderType,
+    })
   }
 
   let accountResult
@@ -782,7 +1012,9 @@ router.get('/', authenticateToken, requireMenu('redemption_codes'), async (req, 
                CASE
                  WHEN ga.id IS NULL THEN 0
                  ELSE COALESCE(ga.is_banned, 0)
-               END AS account_is_banned
+               END AS account_is_banned,
+               rc.fulfillment_mode, rc.supplier_name, rc.supplier_type, rc.supplier_request_id,
+               rc.supplier_status, rc.supplier_response_code, rc.supplier_response_message, rc.supplier_redeemed_at
         FROM redemption_codes rc
         LEFT JOIN gpt_accounts ga
           ON LOWER(TRIM(ga.email)) = LOWER(TRIM(rc.account_email))
@@ -852,7 +1084,9 @@ router.get('/', authenticateToken, requireMenu('redemption_codes'), async (req, 
                CASE
                  WHEN ga.id IS NULL THEN 0
                  ELSE COALESCE(ga.is_banned, 0)
-               END AS account_is_banned
+               END AS account_is_banned,
+               rc.fulfillment_mode, rc.supplier_name, rc.supplier_type, rc.supplier_request_id,
+               rc.supplier_status, rc.supplier_response_code, rc.supplier_response_message, rc.supplier_redeemed_at
         FROM redemption_codes rc
         LEFT JOIN gpt_accounts ga
           ON LOWER(TRIM(ga.email)) = LOWER(TRIM(rc.account_email))
@@ -1043,6 +1277,9 @@ router.post('/batch', authenticateToken, requireMenu('redemption_codes'), async 
     if (!channelConfig || !channelConfig.isActive) {
       return res.status(400).json({ error: '渠道不存在或已停用' })
     }
+    if (isExternalCardRedeemMode(channelConfig)) {
+      return res.status(400).json({ error: 'external-card 渠道请使用“导入外部卡密”功能补货' })
+    }
     const resolvedChannelName = String(channelConfig.name || '').trim() || normalizedChannel
 
     const createdCodes = []
@@ -1085,7 +1322,9 @@ router.post('/batch', authenticateToken, requireMenu('redemption_codes'), async 
       SELECT id, code, is_redeemed, redeemed_at, redeemed_by,
              account_email, channel, channel_name, created_at, updated_at,
              reserved_for_uid, reserved_for_username, reserved_for_entry_id, reserved_at,
-             reserved_for_order_no, reserved_for_order_email, order_type
+             reserved_for_order_no, reserved_for_order_email, order_type,
+             fulfillment_mode, supplier_name, supplier_type, supplier_request_id,
+             supplier_status, supplier_response_code, supplier_response_message, supplier_redeemed_at
       FROM redemption_codes
       WHERE code IN (${createdCodes.map(() => '?').join(',')})
       ORDER BY created_at DESC
@@ -1106,6 +1345,107 @@ router.post('/batch', authenticateToken, requireMenu('redemption_codes'), async 
   } catch (error) {
     console.error('批量创建兑换码错误:', error)
     res.status(500).json({ error: '内部服务器错误' })
+  }
+})
+
+router.post('/import-external', authenticateToken, requireMenu('redemption_codes'), async (req, res) => {
+  try {
+    const db = await getDatabase()
+    const { byKey: channelsByKey } = await getChannels(db)
+
+    const requestedChannel = normalizeChannel(req.body?.channel, 'external-card')
+    const channelConfig = channelsByKey.get(requestedChannel)
+    if (!channelConfig || !channelConfig.isActive) {
+      return res.status(400).json({ error: '渠道不存在或已停用' })
+    }
+    if (!isExternalCardRedeemMode(channelConfig)) {
+      return res.status(400).json({ error: '仅支持导入 external-card 模式渠道的卡密' })
+    }
+
+    const codesText = typeof req.body?.codesText === 'string'
+      ? req.body.codesText
+      : (typeof req.body?.codes_text === 'string' ? req.body.codes_text : '')
+    const rawCodes = Array.isArray(req.body?.codes) ? req.body.codes : []
+    const sourceLines = rawCodes.length > 0
+      ? rawCodes
+      : String(codesText || '')
+          .replace(/\r\n?/g, '\n')
+          .split('\n')
+
+    const seen = new Set()
+    const candidates = []
+    for (const item of sourceLines) {
+      const normalized = String(item ?? '').trim()
+      if (!normalized || seen.has(normalized)) continue
+      seen.add(normalized)
+      candidates.push(normalized)
+    }
+
+    if (!candidates.length) {
+      return res.status(400).json({ error: '请提供至少 1 个卡密' })
+    }
+
+    const importedCodes = []
+    const duplicateCodes = []
+    for (const currentCode of candidates) {
+      try {
+        db.run(
+          `
+            INSERT INTO redemption_codes (
+              code, channel, channel_name, fulfillment_mode, supplier_name, supplier_type, supplier_status, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, DATETIME('now', 'localtime'), DATETIME('now', 'localtime'))
+          `,
+          [
+            currentCode,
+            requestedChannel,
+            String(channelConfig.name || requestedChannel).trim() || requestedChannel,
+            FULFILLMENT_MODE_EXTERNAL,
+            String(channelConfig.name || '').trim(),
+            String(channelConfig.providerType || '').trim(),
+            SUPPLIER_STATUS_PENDING
+          ]
+        )
+        importedCodes.push(currentCode)
+      } catch (error) {
+        if (String(error?.message || '').includes('UNIQUE')) {
+          duplicateCodes.push(currentCode)
+          continue
+        }
+        throw error
+      }
+    }
+
+    saveDatabase()
+
+    const importedResult = importedCodes.length > 0
+      ? db.exec(
+          `
+            SELECT id, code, is_redeemed, redeemed_at, redeemed_by,
+                   account_email, channel, channel_name, created_at, updated_at,
+                   reserved_for_uid, reserved_for_username, reserved_for_entry_id, reserved_at,
+                   reserved_for_order_no, reserved_for_order_email, order_type,
+                   fulfillment_mode, supplier_name, supplier_type, supplier_request_id,
+                   supplier_status, supplier_response_code, supplier_response_message, supplier_redeemed_at
+            FROM redemption_codes
+            WHERE code IN (${importedCodes.map(() => '?').join(',')})
+            ORDER BY created_at DESC
+          `,
+          importedCodes
+        )
+      : []
+
+    const codes = (importedResult[0]?.values || []).map(row => mapCodeRow(row, channelsByKey))
+
+    return res.status(201).json({
+      message: `成功导入 ${importedCodes.length} 个外部卡密`,
+      imported: importedCodes.length,
+      duplicates: duplicateCodes.length,
+      duplicateCodes,
+      codes
+    })
+  } catch (error) {
+    console.error('导入外部卡密失败:', error)
+    return res.status(500).json({ error: '导入外部卡密失败' })
   }
 })
 
@@ -1162,7 +1502,9 @@ router.patch('/:id/channel', authenticateToken, requireMenu('redemption_codes'),
       SELECT id, code, is_redeemed, redeemed_at, redeemed_by,
              account_email, channel, channel_name, created_at, updated_at,
              reserved_for_uid, reserved_for_username, reserved_for_entry_id, reserved_at,
-             reserved_for_order_no, reserved_for_order_email, order_type
+             reserved_for_order_no, reserved_for_order_email, order_type,
+             fulfillment_mode, supplier_name, supplier_type, supplier_request_id,
+             supplier_status, supplier_response_code, supplier_response_message, supplier_redeemed_at
       FROM redemption_codes
       WHERE id = ?
     `, [req.params.id])
@@ -1207,13 +1549,17 @@ router.post('/batch-delete', authenticateToken, requireMenu('redemption_codes'),
 router.post('/admin/redeem', authenticateToken, requireMenu('redemption_codes'), async (req, res) => {
   try {
     const { code, email, channel, redeemerUid, orderType, order_type: orderTypeLegacy } = req.body || {}
-    const result = await redeemCodeInternal({
-      code,
-      email,
-      channel,
-      redeemerUid,
-      orderType: orderType ?? orderTypeLegacy
-    })
+    const lockKey = String(code || '').trim()
+    const result = await withLocks(
+      lockKey ? [`redemption-code:${lockKey}`] : [],
+      () => redeemCodeInternal({
+        code,
+        email,
+        channel,
+        redeemerUid,
+        orderType: orderType ?? orderTypeLegacy
+      })
+    )
     res.json({
       message: '兑换成功',
       data: result.data
@@ -1250,14 +1596,18 @@ router.post('/redeem', async (req, res) => {
       redeemerUid = uid
     }
 
-    const result = await redeemCodeInternal({
-      code,
-      email,
-      channel: normalizedChannel,
-      redeemerUid,
-      orderType: orderType ?? orderTypeLegacy,
-      allowCommonChannelFallback: true
-    })
+    const lockKey = String(code || '').trim()
+    const result = await withLocks(
+      lockKey ? [`redemption-code:${lockKey}`] : [],
+      () => redeemCodeInternal({
+        code,
+        email,
+        channel: normalizedChannel,
+        redeemerUid,
+        orderType: orderType ?? orderTypeLegacy,
+        allowCommonChannelFallback: true
+      })
+    )
     res.json({
       message: '兑换成功',
       data: result.data

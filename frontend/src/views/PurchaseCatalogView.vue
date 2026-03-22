@@ -18,7 +18,11 @@
       {{ errorMessage }}
     </div>
 
-    <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-5 sm:gap-6 xl:gap-7 2xl:gap-8">
+    <div v-if="!loading && !plans.length" class="rounded-[2rem] border border-black/5 dark:border-white/10 bg-white/50 dark:bg-black/20 backdrop-blur-3xl p-8 text-center text-sm text-[#86868b]">
+      当前暂无可售商品，请稍后再来查看。
+    </div>
+
+    <div v-else class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-5 sm:gap-6 xl:gap-7 2xl:gap-8">
       <RouterLink
         v-for="plan in plans"
         :key="plan.key"
@@ -62,7 +66,7 @@
                     </p>
                   </div>
                   <div class="text-right">
-                    <p class="text-[13px] text-[#86868b]">今日库存</p>
+                    <p class="text-[13px] text-[#86868b]">可用库存</p>
                     <p class="text-[15px] font-semibold tabular-nums" :class="Number(plan.availableCount || 0) > 0 ? 'text-[#1d1d1f] dark:text-white' : 'text-[#FF3B30]'">
                       {{ plan.availableCount }} 个
                     </p>

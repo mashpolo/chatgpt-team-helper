@@ -202,20 +202,24 @@ const isGroupExpanded = (key: string) => {
       :class="isSidebarOpen ? 'translate-x-0' : '-translate-x-full'"
     >
       <!-- Logo 区域 -->
-      <div class="px-8 pt-10 pb-6">
-        <div class="flex items-center gap-3 mb-2">
+      <div class="px-6 pt-10 pb-6">
+        <div class="flex min-w-0 items-center gap-3 mb-2">
           <a
             :href="githubRepoUrl"
             target="_blank"
             rel="noopener noreferrer"
-            class="w-8 h-8 rounded-lg bg-gradient-to-br from-gray-900 to-gray-700 flex items-center justify-center shadow-lg shadow-black/10 hover:from-gray-800 hover:to-gray-600 transition-colors"
+            class="w-8 h-8 shrink-0 rounded-lg bg-gradient-to-br from-gray-900 to-gray-700 flex items-center justify-center shadow-lg shadow-black/10 hover:from-gray-800 hover:to-gray-600 transition-colors"
             aria-label="Open GitHub repository"
             title="GitHub"
             @click="handleMenuClick"
           >
             <Github class="w-5 h-5 text-white" />
           </a>
-          <router-link to="/admin" class="text-xl font-semibold tracking-tight text-gray-900" @click="handleMenuClick">
+          <router-link
+            to="/admin"
+            class="block min-w-0 flex-1 truncate whitespace-nowrap text-lg font-semibold tracking-tight leading-none text-gray-900"
+            @click="handleMenuClick"
+          >
             ChatGPT Team Helper
           </router-link>
         </div>

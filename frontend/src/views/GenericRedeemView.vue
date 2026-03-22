@@ -8,7 +8,7 @@
           <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75"></span>
           <span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-[#007AFF]"></span>
         </span>
-        <span class="text-[13px] font-medium text-gray-600 dark:text-gray-300 tracking-wide">自动发邀请 · 验证码一次性</span>
+        <span class="text-[13px] font-medium text-gray-600 dark:text-gray-300 tracking-wide">{{ badgeText }}</span>
       </div>
 
       <div class="space-y-3">
@@ -52,12 +52,12 @@
               <AppleInput
                 v-model="formData.code"
                 label="兑换码"
-                placeholder="XXXX-XXXX-XXXX"
+                :placeholder="codePlaceholder"
                 type="text"
                 variant="filled"
                 :disabled="isLoading"
-                helperText="格式：XXXX-XXXX-XXXX（自动转大写）"
-                :error="formData.code && !isValidCode ? '兑换码格式应为 XXXX-XXXX-XXXX' : ''"
+                :helperText="codeHelperText"
+                :error="formData.code && !isValidCode ? codeErrorText : ''"
                 @input="handleCodeInput"
                 class="transition-all duration-300 group-hover:translate-x-1"
               />
@@ -90,13 +90,17 @@
               <div class="flex-1 space-y-3">
                 <h3 class="text-[15px] font-semibold text-[#1d1d1f] dark:text-white">兑换成功！</h3>
                 <div class="text-[14px] text-[#1d1d1f]/80 dark:text-white/80 space-y-3">
-                  <p>您已成功兑换并加入 ChatGPT Team 账号。</p>
+                  <p>{{ successPrimaryText }}</p>
                   <div class="bg-white/50 dark:bg-black/20 rounded-xl p-3 border border-black/5 dark:border-white/10 space-y-1.5">
-                    <p class="flex justify-between">
+                    <p v-if="successInfo.email || successInfo.accountEmail" class="flex justify-between gap-3">
+                      <span class="text-[#86868b]">{{ successIsExternal ? '提交邮箱' : '账号邮箱' }}</span>
+                      <span class="font-medium truncate text-right">{{ successInfo.email || successInfo.accountEmail }}</span>
+                    </p>
+                    <p v-if="!successIsExternal && successInfo.userCount !== null && successInfo.userCount !== undefined" class="flex justify-between">
                       <span class="text-[#86868b]">当前成员数</span>
                       <span class="font-medium tabular-nums">{{ successInfo.userCount }} / 5</span>
                     </p>
-                    <p v-if="successInfo.inviteStatus" class="flex justify-between items-center">
+                    <p v-if="!successIsExternal && successInfo.inviteStatus" class="flex justify-between items-center">
                       <span class="text-[#86868b]">邀请状态</span>
                       <span
                         class="px-2 py-0.5 rounded-md text-[12px] font-medium"
@@ -107,7 +111,10 @@
                     </p>
                   </div>
                   <p class="text-[13px] leading-normal text-[#86868b]">
-                    <template v-if="successInfo.inviteStatus && successInfo.inviteStatus.includes('已发送')">
+                    <template v-if="successIsExternal">
+                      系统已接受本次兑换请求。如权益未到账，请携带邮箱和卡密联系管理员协助处理。
+                    </template>
+                    <template v-else-if="successInfo.inviteStatus && successInfo.inviteStatus.includes('已发送')">
                       请查看邮箱并接收邀请邮件，然后登录 ChatGPT 使用。
                     </template>
                     <template v-else>
@@ -143,11 +150,15 @@
             <ul class="space-y-3 text-[14px] text-[#1d1d1f]/70 dark:text-white/70">
               <li class="flex items-start gap-3">
                 <span class="h-1.5 w-1.5 rounded-full bg-[#007AFF] mt-2 flex-shrink-0"></span>
-                <span>每个兑换码只能使用一次。</span>
+                <span>{{ tips[0] }}</span>
               </li>
               <li class="flex items-start gap-3">
                 <span class="h-1.5 w-1.5 rounded-full bg-[#007AFF] mt-2 flex-shrink-0"></span>
-                <span>未收到邮件请检查垃圾箱/联系管理员。</span>
+                <span>{{ tips[1] }}</span>
+              </li>
+              <li v-if="tips[2]" class="flex items-start gap-3">
+                <span class="h-1.5 w-1.5 rounded-full bg-[#007AFF] mt-2 flex-shrink-0"></span>
+                <span>{{ tips[2] }}</span>
               </li>
             </ul>
           </div>
@@ -205,11 +216,22 @@ const channelName = computed(() => {
   const match = appConfigStore.channels.find(channel => channel.key === key)
   return (match?.name || key).trim()
 })
+const channelConfig = computed(() => {
+  const key = channelKey.value
+  if (!key) return null
+  return appConfigStore.channels.find(channel => channel.key === key) || null
+})
+const isExternalCardChannel = computed(() => channelConfig.value?.redeemMode === 'external-card')
 
 const title = computed(() => {
+  if (isExternalCardChannel.value) return '卡密兑换'
   const name = channelName.value
   return name ? `${name} 兑换` : '兑换'
 })
+const badgeText = computed(() => isExternalCardChannel.value ? '专属卡密 · 提交后自动处理' : '自动发邀请 · 验证码一次性')
+const codePlaceholder = computed(() => isExternalCardChannel.value ? '请输入卡密' : 'XXXX-XXXX-XXXX')
+const codeHelperText = computed(() => isExternalCardChannel.value ? '支持任意非空卡密，提交时保持原样' : '格式：XXXX-XXXX-XXXX（自动转大写）')
+const codeErrorText = computed(() => isExternalCardChannel.value ? '请输入有效卡密' : '兑换码格式应为 XXXX-XXXX-XXXX')
 
 const {
   formData,
@@ -220,7 +242,30 @@ const {
   isValidCode,
   handleCodeInput,
   handleRedeem,
-} = useRedeemForm(channelKey)
+} = useRedeemForm(channelKey, {
+  rawCodeMode: isExternalCardChannel
+})
+const successIsExternal = computed(() => Boolean(successInfo.value?.fulfillmentMode === 'external_api' || isExternalCardChannel.value))
+const successPrimaryText = computed(() => {
+  if (!successInfo.value) return ''
+  if (successIsExternal.value) {
+    return successInfo.value.message || '卡密已提交并完成兑换。'
+  }
+  return '您已成功兑换并加入 ChatGPT Team 账号。'
+})
+const tips = computed(() => (
+  successIsExternal.value || isExternalCardChannel.value
+    ? [
+        '每个卡密只能使用一次，请勿重复提交。',
+        '请填写最终要开通权益的邮箱地址。',
+        '如提示卡密失效或未到账，请联系管理员处理。'
+      ]
+    : [
+        '每个兑换码只能使用一次。',
+        '未收到邮件请检查垃圾箱/联系管理员。',
+        ''
+      ]
+))
 </script>
 
 <style scoped>
@@ -245,4 +290,3 @@ const {
   animation: shake 0.4s cubic-bezier(0.36, 0.07, 0.19, 0.97) both;
 }
 </style>
-

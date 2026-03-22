@@ -29,11 +29,29 @@ import {
 } from '@/components/ui/dialog'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import AnnouncementAdminPanel from '@/components/AnnouncementAdminPanel.vue'
+import InfoTooltip from '@/components/InfoTooltip.vue'
 import { Eye, EyeOff, Sparkles, KeyRound, AlertCircle, CheckCircle2, RefreshCw, Settings, CreditCard, Link, Mail, Shield } from 'lucide-vue-next'
 
 const teleportReady = ref(false)
 const activeTab = ref<'settings' | 'announcements'>('settings')
-const settingsSubTab = ref('general')
+type SettingsModuleId = 'general' | 'billing' | 'integrations' | 'notifications' | 'security'
+type SettingsResourceKey =
+  | 'apiKey'
+  | 'featureFlags'
+  | 'accountRecovery'
+  | 'channels'
+  | 'purchaseProducts'
+  | 'emailWhitelist'
+  | 'pointsWithdraw'
+  | 'smtp'
+  | 'linuxdoOauth'
+  | 'linuxdoCredit'
+  | 'zpay'
+  | 'turnstile'
+  | 'telegram'
+  | 'upstream'
+
+const settingsSubTab = ref<SettingsModuleId>('general')
 
 const settingsNav = [
   { id: 'general', label: '基础设置', desc: '功能开关、白名单与补录', icon: Settings },
@@ -41,9 +59,26 @@ const settingsNav = [
   { id: 'integrations', label: '第三方集成', desc: 'OAuth、验证与机器人', icon: Link },
   { id: 'notifications', label: '邮件与通知', desc: 'SMTP 告警邮件配置', icon: Mail },
   { id: 'security', label: '核心与安全', desc: 'API 密钥与渠道管理', icon: Shield },
-]
+] as const
 
 const activeNavItem = computed(() => settingsNav.find(n => n.id === settingsSubTab.value))
+const settingsResourceLoaded = ref<Record<SettingsResourceKey, boolean>>({
+  apiKey: false,
+  featureFlags: false,
+  accountRecovery: false,
+  channels: false,
+  purchaseProducts: false,
+  emailWhitelist: false,
+  pointsWithdraw: false,
+  smtp: false,
+  linuxdoOauth: false,
+  linuxdoCredit: false,
+  zpay: false,
+  turnstile: false,
+  telegram: false,
+  upstream: false,
+})
+const settingsResourcePromises = new Map<SettingsResourceKey, Promise<void>>()
 
 // 版本检查相关
 const versionLoading = ref(false)
@@ -126,9 +161,28 @@ const channelDialogOpen = ref(false)
 const channelDialogMode = ref<'create' | 'edit'>('create')
 const channelFormKey = ref('')
 const channelFormName = ref('')
+const channelFormRedeemMode = ref('code')
+const channelFormProviderType = ref('local')
 const channelFormAllowFallback = ref(false)
 const channelFormIsActive = ref(true)
 const channelFormSortOrder = ref('0')
+const channelRedeemModeOptions = [
+  { value: 'code', label: '站内兑换码' },
+  { value: 'linux-do', label: 'Linux DO' },
+  { value: 'xhs', label: '小红书' },
+  { value: 'xianyu', label: '闲鱼' },
+  { value: 'external-card', label: '上游卡密' }
+]
+const channelProviderTypeOptions = [
+  { value: 'local', label: '本地履约' },
+  { value: 'custom-http', label: '自定义接口' },
+  { value: 'platform-upstream', label: '平台通用接口' }
+]
+const channelFormProviderOptions = computed(() => (
+  channelFormRedeemMode.value === 'external-card'
+    ? channelProviderTypeOptions.filter(option => option.value !== 'local')
+    : channelProviderTypeOptions.filter(option => option.value === 'local')
+))
 
 // 支付商品管理（仅超级管理员）
 const purchaseProducts = ref<PurchaseProduct[]>([])
@@ -239,27 +293,44 @@ const telegramSuccess = ref('')
 const telegramLoading = ref(false)
 const showTelegramBotToken = ref(false)
 
+// 上游履约配置（仅超级管理员）
+const DEFAULT_UPSTREAM_CUSTOM_BODY_TEMPLATE = JSON.stringify({
+  userEmail: '{{email}}',
+  cardCode: '{{code}}'
+}, null, 2)
+const upstreamConfigTab = ref<'outbound' | 'inbound'>('outbound')
+const upstreamProviderEnabled = ref<'true' | 'false'>('false')
+const upstreamProviderType = ref('custom-http')
+const upstreamSupplierName = ref('')
+const upstreamBaseUrl = ref('')
+const upstreamCustomUrl = ref('')
+const upstreamCustomBodyTemplate = ref(DEFAULT_UPSTREAM_CUSTOM_BODY_TEMPLATE)
+const upstreamTimeoutMs = ref('15000')
+const upstreamOutboundApiKey = ref('')
+const upstreamOutboundApiKeySet = ref(false)
+const upstreamOutboundApiKeyStored = ref(false)
+const upstreamApiEnabled = ref<'true' | 'false'>('false')
+const upstreamIncomingApiKey = ref('')
+const upstreamIncomingApiKeySet = ref(false)
+const upstreamIncomingApiKeyStored = ref(false)
+const upstreamError = ref('')
+const upstreamSuccess = ref('')
+const upstreamLoading = ref(false)
+const showUpstreamOutboundApiKey = ref(false)
+const showUpstreamIncomingApiKey = ref(false)
+const isCustomUpstreamProvider = computed(() => upstreamProviderType.value === 'custom-http')
+const isPlatformUpstreamProvider = computed(() => upstreamProviderType.value === 'platform-upstream')
+const upstreamPlaceholderHelp = '支持 {{email}}、{{code}}、{{channel}} 三个占位符。'
+const normalizeUpstreamProviderValue = (value?: string | null) => (
+  value === 'platform-upstream' ? 'platform-upstream' : 'custom-http'
+)
+const normalizeChannelProviderValue = (value?: string | null) => (
+  value === 'platform-upstream' ? 'platform-upstream' : (value === 'local' ? 'local' : 'custom-http')
+)
+
 onMounted(async () => {
   await nextTick()
   teleportReady.value = !!document.getElementById('header-actions')
-
-  if (!isSuperAdmin.value) return
-  await loadApiKey()
-  await Promise.all([
-    loadFeatureFlags(),
-    loadAccountRecoverySettings(),
-    loadChannels(),
-    loadPurchaseProducts(),
-    loadPurchaseAvailability(),
-    loadEmailDomainWhitelist(),
-    loadPointsWithdrawSettings(),
-    loadSmtpSettings(),
-    loadLinuxDoOAuthSettings(),
-    loadLinuxDoCreditSettings(),
-    loadZpaySettings(),
-    loadTurnstileSettings(),
-    loadTelegramSettings(),
-  ])
 })
 
 onUnmounted(() => {
@@ -327,6 +398,16 @@ watch(accountRecoveryForceTodayCodes, (next) => {
   }
 })
 
+watch(channelFormRedeemMode, (next) => {
+  if (next === 'external-card') {
+    if (channelFormProviderType.value === 'local') {
+      channelFormProviderType.value = 'custom-http'
+    }
+    return
+  }
+  channelFormProviderType.value = 'local'
+})
+
 const loadAccountRecoverySettings = async () => {
   accountRecoverySettingsError.value = ''
   accountRecoverySettingsSuccess.value = ''
@@ -392,6 +473,8 @@ const openCreateChannelDialog = () => {
   channelDialogMode.value = 'create'
   channelFormKey.value = ''
   channelFormName.value = ''
+  channelFormRedeemMode.value = 'code'
+  channelFormProviderType.value = 'local'
   channelFormAllowFallback.value = false
   channelFormIsActive.value = true
   channelFormSortOrder.value = '0'
@@ -402,6 +485,10 @@ const openEditChannelDialog = (channel: Channel) => {
   channelDialogMode.value = 'edit'
   channelFormKey.value = channel.key
   channelFormName.value = channel.name
+  channelFormRedeemMode.value = channel.redeemMode === 'api' ? 'code' : (channel.redeemMode || 'code')
+  channelFormProviderType.value = channel.redeemMode === 'external-card' && channel.providerType === 'local'
+    ? 'custom-http'
+    : normalizeChannelProviderValue(channel.providerType)
   channelFormAllowFallback.value = Boolean(channel.allowCommonFallback)
   channelFormIsActive.value = Boolean(channel.isActive)
   channelFormSortOrder.value = String(channel.sortOrder ?? 0)
@@ -416,6 +503,8 @@ const submitChannelDialog = async () => {
       await adminService.createChannel({
         key: channelFormKey.value.trim(),
         name: channelFormName.value.trim(),
+        redeemMode: channelFormRedeemMode.value,
+        providerType: channelFormProviderType.value,
         allowCommonFallback: channelFormAllowFallback.value,
         isActive: channelFormIsActive.value,
         sortOrder: Number.parseInt(channelFormSortOrder.value || '0', 10) || 0
@@ -423,6 +512,8 @@ const submitChannelDialog = async () => {
     } else {
       await adminService.updateChannel(channelFormKey.value, {
         name: channelFormName.value.trim(),
+        redeemMode: channelFormRedeemMode.value,
+        providerType: channelFormProviderType.value,
         allowCommonFallback: channelFormAllowFallback.value,
         isActive: channelFormIsActive.value,
         sortOrder: Number.parseInt(channelFormSortOrder.value || '0', 10) || 0
@@ -496,7 +587,8 @@ const refreshPurchaseProducts = async () => {
   await Promise.all([loadPurchaseProducts(), loadPurchaseAvailability()])
 }
 
-const openCreatePurchaseProductDialog = () => {
+const openCreatePurchaseProductDialog = async () => {
+  await ensureSettingsResourceLoaded('channels')
   purchaseProductDialogMode.value = 'create'
   purchaseProductFormKey.value = ''
   purchaseProductFormName.value = ''
@@ -509,7 +601,8 @@ const openCreatePurchaseProductDialog = () => {
   purchaseProductDialogOpen.value = true
 }
 
-const openEditPurchaseProductDialog = (product: PurchaseProduct) => {
+const openEditPurchaseProductDialog = async (product: PurchaseProduct) => {
+  await ensureSettingsResourceLoaded('channels')
   purchaseProductDialogMode.value = 'edit'
   purchaseProductFormKey.value = product.productKey
   purchaseProductFormName.value = product.productName
@@ -651,6 +744,14 @@ const toggleShowTurnstileSecretKey = () => {
 
 const toggleShowTelegramBotToken = () => {
   showTelegramBotToken.value = !showTelegramBotToken.value
+}
+
+const toggleShowUpstreamOutboundApiKey = () => {
+  showUpstreamOutboundApiKey.value = !showUpstreamOutboundApiKey.value
+}
+
+const toggleShowUpstreamIncomingApiKey = () => {
+  showUpstreamIncomingApiKey.value = !showUpstreamIncomingApiKey.value
 }
 
 const loadEmailDomainWhitelist = async () => {
@@ -1017,6 +1118,147 @@ const saveTelegramSettings = async () => {
   }
 }
 
+const loadUpstreamSettings = async () => {
+  upstreamError.value = ''
+  upstreamSuccess.value = ''
+  try {
+    const response = await adminService.getUpstreamSettings()
+    upstreamProviderEnabled.value = response.upstream?.providerEnabled ? 'true' : 'false'
+    upstreamProviderType.value = normalizeUpstreamProviderValue(response.upstream?.providerType)
+    upstreamSupplierName.value = response.upstream?.supplierName || ''
+    upstreamBaseUrl.value = response.upstream?.baseUrl || ''
+    upstreamCustomUrl.value = response.upstream?.customUrl || ''
+    upstreamCustomBodyTemplate.value = response.upstream?.customBodyTemplate || DEFAULT_UPSTREAM_CUSTOM_BODY_TEMPLATE
+    upstreamTimeoutMs.value = String(response.upstream?.timeoutMs ?? 15000)
+    upstreamOutboundApiKey.value = ''
+    upstreamOutboundApiKeySet.value = Boolean(response.upstream?.outboundApiKeySet)
+    upstreamOutboundApiKeyStored.value = Boolean(response.upstream?.outboundApiKeyStored)
+    upstreamApiEnabled.value = response.upstream?.apiEnabled ? 'true' : 'false'
+    upstreamIncomingApiKey.value = ''
+    upstreamIncomingApiKeySet.value = Boolean(response.upstream?.incomingApiKeySet)
+    upstreamIncomingApiKeyStored.value = Boolean(response.upstream?.incomingApiKeyStored)
+  } catch (err: any) {
+    upstreamError.value = err.response?.data?.error || '加载上游配置失败'
+  }
+}
+
+const saveUpstreamSettings = async () => {
+  upstreamError.value = ''
+  upstreamSuccess.value = ''
+  const providerEnabled = upstreamProviderEnabled.value === 'true'
+  const providerType = normalizeUpstreamProviderValue(upstreamProviderType.value)
+  const baseUrl = upstreamBaseUrl.value.trim()
+  const customUrl = upstreamCustomUrl.value.trim()
+  const customBodyTemplate = upstreamCustomBodyTemplate.value.trim() || DEFAULT_UPSTREAM_CUSTOM_BODY_TEMPLATE
+
+  if (providerType === 'platform-upstream') {
+    if (providerEnabled && !baseUrl) {
+      upstreamError.value = '启用平台通用接口时必须填写平台 Base URL'
+      return
+    }
+
+    if (baseUrl) {
+      try {
+        const parsed = new URL(baseUrl)
+        if (!['http:', 'https:'].includes(parsed.protocol)) {
+          upstreamError.value = '上游 Base URL 必须是 http(s)'
+          return
+        }
+      } catch {
+        upstreamError.value = '上游 Base URL 格式不正确'
+        return
+      }
+    }
+  }
+
+  if (providerType === 'custom-http') {
+    if (providerEnabled && !customUrl) {
+      upstreamError.value = '启用自定义接口时必须填写请求 URL'
+      return
+    }
+
+    if (customUrl) {
+      try {
+        const parsed = new URL(customUrl)
+        if (!['http:', 'https:'].includes(parsed.protocol)) {
+          upstreamError.value = '自定义接口 URL 必须是 http(s)'
+          return
+        }
+      } catch {
+        upstreamError.value = '自定义接口 URL 格式不正确'
+        return
+      }
+    }
+
+    try {
+      JSON.parse(customBodyTemplate)
+    } catch {
+      upstreamError.value = '自定义接口 Body JSON 格式不正确，或占位符位置不合法'
+      return
+    }
+  }
+
+  const timeoutMs = Number.parseInt(upstreamTimeoutMs.value.trim(), 10)
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    upstreamError.value = '超时时间需为正整数（毫秒）'
+    return
+  }
+
+  upstreamLoading.value = true
+  try {
+    const payload: any = {
+      upstream: {
+        providerEnabled,
+        providerType,
+        supplierName: upstreamSupplierName.value.trim(),
+        timeoutMs,
+        apiEnabled: upstreamApiEnabled.value === 'true'
+      }
+    }
+
+    if (providerType === 'platform-upstream') {
+      payload.upstream.baseUrl = baseUrl
+    }
+
+    if (providerType === 'custom-http') {
+      payload.upstream.customUrl = customUrl
+      payload.upstream.customBodyTemplate = customBodyTemplate
+    }
+
+    const outboundKey = upstreamOutboundApiKey.value.trim()
+    if (providerType === 'platform-upstream' && outboundKey) {
+      payload.upstream.outboundApiKey = outboundKey
+    }
+    const incomingKey = upstreamIncomingApiKey.value.trim()
+    if (incomingKey) {
+      payload.upstream.incomingApiKey = incomingKey
+    }
+
+    const response = await adminService.updateUpstreamSettings(payload)
+    upstreamProviderEnabled.value = response.upstream?.providerEnabled ? 'true' : 'false'
+    upstreamProviderType.value = normalizeUpstreamProviderValue(response.upstream?.providerType)
+    upstreamSupplierName.value = response.upstream?.supplierName || upstreamSupplierName.value.trim()
+    upstreamBaseUrl.value = response.upstream?.baseUrl || baseUrl
+    upstreamCustomUrl.value = response.upstream?.customUrl || customUrl
+    upstreamCustomBodyTemplate.value = response.upstream?.customBodyTemplate || customBodyTemplate
+    upstreamTimeoutMs.value = String(response.upstream?.timeoutMs ?? timeoutMs)
+    upstreamOutboundApiKey.value = ''
+    upstreamOutboundApiKeySet.value = Boolean(response.upstream?.outboundApiKeySet)
+    upstreamOutboundApiKeyStored.value = Boolean(response.upstream?.outboundApiKeyStored)
+    upstreamApiEnabled.value = response.upstream?.apiEnabled ? 'true' : 'false'
+    upstreamIncomingApiKey.value = ''
+    upstreamIncomingApiKeySet.value = Boolean(response.upstream?.incomingApiKeySet)
+    upstreamIncomingApiKeyStored.value = Boolean(response.upstream?.incomingApiKeyStored)
+
+    upstreamSuccess.value = '已保存'
+    setTimeout(() => (upstreamSuccess.value = ''), 3000)
+  } catch (err: any) {
+    upstreamError.value = err.response?.data?.error || '保存失败'
+  } finally {
+    upstreamLoading.value = false
+  }
+}
+
 const loadSmtpSettings = async () => {
   smtpError.value = ''
   smtpSuccess.value = ''
@@ -1158,6 +1400,93 @@ const savePointsWithdrawSettings = async () => {
     pointsWithdrawLoading.value = false
   }
 }
+
+const getSettingsResourceLoader = (resource: SettingsResourceKey) => {
+  switch (resource) {
+    case 'apiKey':
+      return loadApiKey
+    case 'featureFlags':
+      return loadFeatureFlags
+    case 'accountRecovery':
+      return loadAccountRecoverySettings
+    case 'channels':
+      return loadChannels
+    case 'purchaseProducts':
+      return refreshPurchaseProducts
+    case 'emailWhitelist':
+      return loadEmailDomainWhitelist
+    case 'pointsWithdraw':
+      return loadPointsWithdrawSettings
+    case 'smtp':
+      return loadSmtpSettings
+    case 'linuxdoOauth':
+      return loadLinuxDoOAuthSettings
+    case 'linuxdoCredit':
+      return loadLinuxDoCreditSettings
+    case 'zpay':
+      return loadZpaySettings
+    case 'turnstile':
+      return loadTurnstileSettings
+    case 'telegram':
+      return loadTelegramSettings
+    case 'upstream':
+      return loadUpstreamSettings
+  }
+}
+
+const settingsModuleResources: Record<SettingsModuleId, SettingsResourceKey[]> = {
+  general: ['emailWhitelist', 'featureFlags', 'accountRecovery'],
+  billing: ['purchaseProducts', 'channels', 'zpay', 'pointsWithdraw'],
+  integrations: ['linuxdoOauth', 'linuxdoCredit', 'turnstile', 'telegram', 'upstream'],
+  notifications: ['smtp'],
+  security: ['apiKey', 'channels'],
+}
+
+const ensureSettingsResourceLoaded = async (
+  resource: SettingsResourceKey,
+  { force = false }: { force?: boolean } = {}
+) => {
+  if (!isSuperAdmin.value) return
+  if (!force && settingsResourceLoaded.value[resource]) return
+
+  if (!force) {
+    const pending = settingsResourcePromises.get(resource)
+    if (pending) {
+      await pending
+      return
+    }
+  }
+
+  const task = (async () => {
+    await getSettingsResourceLoader(resource)()
+    settingsResourceLoaded.value[resource] = true
+  })().finally(() => {
+    settingsResourcePromises.delete(resource)
+  })
+
+  settingsResourcePromises.set(resource, task)
+  await task
+}
+
+const ensureSettingsModuleLoaded = async (
+  moduleId: SettingsModuleId,
+  { force = false }: { force?: boolean } = {}
+) => {
+  if (!isSuperAdmin.value) return
+  await Promise.all(
+    settingsModuleResources[moduleId].map(resource => ensureSettingsResourceLoaded(resource, { force }))
+  )
+}
+
+watch(settingsSubTab, (next) => {
+  if (!isSuperAdmin.value || activeTab.value !== 'settings') return
+  void ensureSettingsModuleLoaded(next)
+}, { immediate: true })
+
+watch(activeTab, (next) => {
+  if (!isSuperAdmin.value || next !== 'settings') return
+  void ensureSettingsModuleLoaded(settingsSubTab.value)
+})
 </script>
 
 <template>
@@ -1616,6 +1945,7 @@ const savePointsWithdrawSettings = async () => {
                   <th class="px-4 py-3 font-semibold">Key</th>
                   <th class="px-4 py-3 font-semibold">名称</th>
                   <th class="px-4 py-3 font-semibold">模式</th>
+                  <th class="px-4 py-3 font-semibold">Provider</th>
                   <th class="px-4 py-3 font-semibold">回退通用码</th>
                   <th class="px-4 py-3 font-semibold">状态</th>
                   <th class="px-4 py-3 font-semibold">兑换链接</th>
@@ -1627,6 +1957,7 @@ const savePointsWithdrawSettings = async () => {
                   <td class="px-4 py-3 font-mono text-gray-900">{{ channel.key }}</td>
                   <td class="px-4 py-3 text-gray-900">{{ channel.name }}</td>
                   <td class="px-4 py-3 font-mono text-gray-700">{{ channel.redeemMode }}</td>
+                  <td class="px-4 py-3 font-mono text-gray-700">{{ channel.providerType }}</td>
                   <td class="px-4 py-3">
                     <span class="px-2 py-1 rounded-full text-xs font-medium" :class="channel.allowCommonFallback ? 'bg-green-50 text-green-700' : 'bg-gray-100 text-gray-600'">
                       {{ channel.allowCommonFallback ? '允许' : '不允许' }}
@@ -1653,7 +1984,7 @@ const savePointsWithdrawSettings = async () => {
                   </td>
                 </tr>
                 <tr v-if="!channels.length">
-                  <td colspan="7" class="px-4 py-6 text-center text-gray-400">暂无渠道数据</td>
+                  <td colspan="8" class="px-4 py-6 text-center text-gray-400">暂无渠道数据</td>
                 </tr>
               </tbody>
             </table>
@@ -1742,119 +2073,6 @@ const savePointsWithdrawSettings = async () => {
           </div>
         </CardContent>
       </Card>
-
-      <Dialog v-model:open="channelDialogOpen">
-        <DialogContent class="sm:max-w-lg">
-          <DialogHeader>
-            <DialogTitle class="text-xl font-bold text-gray-900">{{ channelDialogMode === 'create' ? '新增渠道' : '编辑渠道' }}</DialogTitle>
-            <DialogDescription class="text-gray-500">渠道 key 仅支持小写字母/数字/连字符。</DialogDescription>
-          </DialogHeader>
-
-          <div class="space-y-4 py-4">
-            <div class="space-y-2">
-              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">渠道 Key</Label>
-              <Input v-model="channelFormKey" :disabled="channelDialogMode === 'edit'" placeholder="douyin" class="h-11 bg-gray-50 border-gray-200 rounded-xl font-mono text-sm" />
-            </div>
-            <div class="space-y-2">
-              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">渠道名称</Label>
-              <Input v-model="channelFormName" placeholder="抖音渠道" class="h-11 bg-gray-50 border-gray-200 rounded-xl text-sm" />
-            </div>
-            <div class="flex items-center justify-between p-4 bg-gray-50 rounded-2xl border border-gray-100">
-              <div class="space-y-1">
-                <p class="font-medium text-gray-900">允许回退通用码</p>
-                <p class="text-xs text-gray-500">开启后可在该渠道入口使用通用渠道兑换码。</p>
-              </div>
-              <input type="checkbox" v-model="channelFormAllowFallback" class="w-6 h-6 rounded-md border-gray-300 text-blue-600 focus:ring-blue-500" />
-            </div>
-            <div class="flex items-center justify-between p-4 bg-gray-50 rounded-2xl border border-gray-100">
-              <div class="space-y-1">
-                <p class="font-medium text-gray-900">启用</p>
-              </div>
-              <input type="checkbox" v-model="channelFormIsActive" class="w-6 h-6 rounded-md border-gray-300 text-blue-600 focus:ring-blue-500" />
-            </div>
-            <div class="space-y-2">
-              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">排序（sortOrder）</Label>
-              <Input v-model="channelFormSortOrder" type="number" class="h-11 bg-gray-50 border-gray-200 rounded-xl font-mono text-sm" />
-            </div>
-
-            <div class="flex flex-col sm:flex-row gap-3 pt-2">
-              <Button type="button" variant="outline" class="w-full sm:w-auto h-11 px-4 border-gray-200 rounded-xl" @click="channelDialogOpen = false">
-                取消
-              </Button>
-              <Button type="button" class="w-full h-11 rounded-xl bg-black hover:bg-gray-800 text-white shadow-lg shadow-black/5" @click="submitChannelDialog">
-                保存
-              </Button>
-            </div>
-          </div>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog v-model:open="purchaseProductDialogOpen">
-        <DialogContent class="sm:max-w-lg">
-          <DialogHeader>
-            <DialogTitle class="text-xl font-bold text-gray-900">{{ purchaseProductDialogMode === 'create' ? '新增商品' : '编辑商品' }}</DialogTitle>
-            <DialogDescription class="text-gray-500">codeChannels 按优先级用英文逗号分隔，例如：paypal,common</DialogDescription>
-          </DialogHeader>
-
-          <div class="space-y-4 py-4">
-            <div class="space-y-2">
-              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">商品 Key</Label>
-              <Input v-model="purchaseProductFormKey" :disabled="purchaseProductDialogMode === 'edit'" placeholder="warranty_90" class="h-11 bg-gray-50 border-gray-200 rounded-xl font-mono text-sm" />
-            </div>
-            <div class="space-y-2">
-              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">名称</Label>
-              <Input v-model="purchaseProductFormName" placeholder="质保 90 天" class="h-11 bg-gray-50 border-gray-200 rounded-xl text-sm" />
-            </div>
-            <div class="grid grid-cols-2 gap-3">
-              <div class="space-y-2">
-                <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">价格（amount）</Label>
-                <Input v-model="purchaseProductFormAmount" placeholder="15.00" class="h-11 bg-gray-50 border-gray-200 rounded-xl font-mono text-sm" />
-              </div>
-              <div class="space-y-2">
-                <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">服务期（天）</Label>
-                <Input v-model="purchaseProductFormServiceDays" type="number" class="h-11 bg-gray-50 border-gray-200 rounded-xl font-mono text-sm" />
-              </div>
-            </div>
-            <div class="space-y-2">
-              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">订单类型（orderType）</Label>
-              <Select v-model="purchaseProductFormOrderType">
-                <SelectTrigger class="h-11 bg-gray-50 border-gray-200 rounded-xl">
-                  <SelectValue placeholder="请选择" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="warranty">warranty</SelectItem>
-                  <SelectItem value="no_warranty">no_warranty</SelectItem>
-                  <SelectItem value="anti_ban">anti_ban</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <div class="space-y-2">
-              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">渠道策略（codeChannels）</Label>
-              <Input v-model="purchaseProductFormCodeChannels" placeholder="paypal,common" class="h-11 bg-gray-50 border-gray-200 rounded-xl font-mono text-sm" />
-              <p class="text-xs text-gray-400">可用渠道：{{ channels.map(c => c.key).join(', ') || '（暂无）' }}</p>
-            </div>
-            <div class="flex items-center justify-between p-4 bg-gray-50 rounded-2xl border border-gray-100">
-              <div class="space-y-1">
-                <p class="font-medium text-gray-900">上架</p>
-              </div>
-              <input type="checkbox" v-model="purchaseProductFormIsActive" class="w-6 h-6 rounded-md border-gray-300 text-blue-600 focus:ring-blue-500" />
-            </div>
-            <div class="space-y-2">
-              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">排序（sortOrder）</Label>
-              <Input v-model="purchaseProductFormSortOrder" type="number" class="h-11 bg-gray-50 border-gray-200 rounded-xl font-mono text-sm" />
-            </div>
-
-            <div class="flex flex-col sm:flex-row gap-3 pt-2">
-              <Button type="button" variant="outline" class="w-full sm:w-auto h-11 px-4 border-gray-200 rounded-xl" @click="purchaseProductDialogOpen = false">
-                取消
-              </Button>
-              <Button type="button" class="w-full h-11 rounded-xl bg-black hover:bg-gray-800 text-white shadow-lg shadow-black/5" @click="submitPurchaseProductDialog">
-                保存
-              </Button>
-            </div>
-          </div>
-        </DialogContent>
-      </Dialog>
 
             </template>
 
@@ -2147,6 +2365,287 @@ const savePointsWithdrawSettings = async () => {
               @click="saveLinuxDoCreditSettings"
             >
               {{ linuxdoCreditLoading ? '保存中...' : '保存 Linux DO Credit 配置' }}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card v-if="isSuperAdmin" class="bg-white rounded-[32px] border border-gray-100 shadow-sm overflow-hidden flex flex-col lg:col-span-2">
+        <CardHeader class="border-b border-gray-50 bg-gray-50/30 px-6 py-5 sm:px-8 sm:py-6">
+          <CardTitle class="text-xl font-bold text-gray-900">上游接口配置</CardTitle>
+          <CardDescription class="text-gray-500">出站用于把卡密提交到外部系统，入站用于让其他平台通过标准接口调用当前平台。</CardDescription>
+        </CardHeader>
+        <CardContent class="p-6 sm:p-8 space-y-6 flex-1">
+          <Tabs v-model="upstreamConfigTab" class="space-y-6">
+            <div class="rounded-2xl border border-gray-200 bg-gray-50/80 p-2">
+              <TabsList class="grid h-auto w-full grid-cols-2 gap-2 bg-transparent p-0">
+                <TabsTrigger value="outbound" class="rounded-xl px-4 py-3">出站履约</TabsTrigger>
+                <TabsTrigger value="inbound" class="rounded-xl px-4 py-3">入站接口</TabsTrigger>
+              </TabsList>
+            </div>
+
+            <TabsContent value="outbound" class="mt-0 space-y-6">
+              <div class="rounded-2xl border border-blue-100 bg-blue-50/60 p-4 text-sm text-blue-900">
+                <div class="flex items-start gap-2">
+                  <div class="mt-0.5 h-2.5 w-2.5 rounded-full bg-blue-500"></div>
+                  <div class="space-y-1">
+                    <p class="font-semibold">出站履约会在兑换或支付成功后触发。</p>
+                    <p class="text-blue-800/80">如果这里没配完整，外部卡密商品不会再进入可售流程，避免出现先付款后履约失败。</p>
+                  </div>
+                </div>
+              </div>
+
+              <div class="grid gap-4 lg:grid-cols-2">
+                <div class="space-y-2">
+                  <div class="flex items-center gap-2">
+                    <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">出站履约开关</Label>
+                    <InfoTooltip content="关闭后，所有 external-card 渠道都不会向外部系统发起请求。" width-class="w-64" />
+                  </div>
+                  <Select v-model="upstreamProviderEnabled" :disabled="upstreamLoading">
+                    <SelectTrigger class="h-11 bg-gray-50 border-gray-200 rounded-xl">
+                      <SelectValue placeholder="选择状态" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="true">启用</SelectItem>
+                      <SelectItem value="false">禁用</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div class="space-y-2">
+                  <div class="flex items-center gap-2">
+                    <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Provider 类型</Label>
+                    <InfoTooltip content="自定义接口适合任意第三方 JSON 接口；平台通用接口适合同项目实例之间对接，固定调用 /api/upstream/cards/redeem。" width-class="w-72" />
+                  </div>
+                  <Select v-model="upstreamProviderType" :disabled="upstreamLoading">
+                    <SelectTrigger class="h-11 bg-gray-50 border-gray-200 rounded-xl">
+                      <SelectValue placeholder="选择 Provider" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="custom-http">自定义接口</SelectItem>
+                      <SelectItem value="platform-upstream">平台通用接口</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+
+              <div class="grid gap-4 lg:grid-cols-2">
+                <div class="space-y-2">
+                  <div class="flex items-center gap-2">
+                    <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">供应商名称</Label>
+                    <InfoTooltip content="仅用于后台识别来源，用户前台不会展示这个名字。" width-class="w-60" />
+                  </div>
+                  <Input
+                    v-model="upstreamSupplierName"
+                    type="text"
+                    placeholder="例如：供应商 A"
+                    class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all text-sm"
+                    :disabled="upstreamLoading"
+                  />
+                </div>
+
+                <div class="space-y-2">
+                  <div class="flex items-center gap-2">
+                    <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">请求超时（毫秒）</Label>
+                    <InfoTooltip content="外部接口超时后本次履约会失败，支付订单会保留为已支付未开通，可在修复配置后通过订单刷新重试。" width-class="w-80" />
+                  </div>
+                  <Input
+                    v-model="upstreamTimeoutMs"
+                    type="text"
+                    placeholder="15000"
+                    class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all font-mono text-sm"
+                    :disabled="upstreamLoading"
+                  />
+                </div>
+              </div>
+
+              <div v-if="isCustomUpstreamProvider" class="space-y-4">
+                <div class="space-y-2">
+                  <div class="flex items-center gap-2">
+                    <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">自定义接口 URL</Label>
+                    <InfoTooltip content="填写完整的请求地址。系统会用 POST + application/json 调用这里。" width-class="w-64" />
+                  </div>
+                  <Input
+                    v-model="upstreamCustomUrl"
+                    type="text"
+                    placeholder="https://partner.example.com/api/redeem"
+                    class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all font-mono text-sm"
+                    :disabled="upstreamLoading"
+                  />
+                </div>
+
+                <div class="space-y-2">
+                  <div class="flex items-center gap-2">
+                    <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">自定义 Body JSON</Label>
+                    <InfoTooltip :content="`系统会先替换占位符，再按 JSON 发送。\n${upstreamPlaceholderHelp}`" width-class="w-80" />
+                  </div>
+                  <textarea
+                    v-model="upstreamCustomBodyTemplate"
+                    rows="8"
+                    placeholder='{"userEmail":"{{email}}","cardCode":"{{code}}"}'
+                    class="w-full rounded-2xl border border-gray-200 bg-gray-50 px-4 py-3 font-mono text-sm text-gray-900 outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                    :disabled="upstreamLoading"
+                  ></textarea>
+                  <p class="text-xs text-gray-400">
+                    {{ upstreamPlaceholderHelp }}
+                  </p>
+                </div>
+              </div>
+
+              <div v-else-if="isPlatformUpstreamProvider" class="space-y-4">
+                <div class="grid gap-4 lg:grid-cols-2">
+                  <div class="space-y-2">
+                    <div class="flex items-center gap-2">
+                      <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">平台 Base URL</Label>
+                      <InfoTooltip content="填写对方平台的根地址，系统会自动拼接标准路径 /api/upstream/cards/redeem。" width-class="w-72" />
+                    </div>
+                    <Input
+                      v-model="upstreamBaseUrl"
+                      type="text"
+                      placeholder="https://partner.example.com"
+                      class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all font-mono text-sm"
+                      :disabled="upstreamLoading"
+                    />
+                  </div>
+
+                  <div class="space-y-2">
+                    <div class="flex items-center gap-2">
+                      <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">出站 API Key</Label>
+                      <InfoTooltip content="如果对方平台启用了入站 API 密钥，这里填写对应的出站密钥。" width-class="w-72" />
+                    </div>
+                    <div class="relative">
+                      <Input
+                        v-model="upstreamOutboundApiKey"
+                        :type="showUpstreamOutboundApiKey ? 'text' : 'password'"
+                        placeholder="留空表示不修改"
+                        class="h-11 pr-10 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all font-mono text-sm"
+                        :disabled="upstreamLoading"
+                      />
+                      <button
+                        type="button"
+                        @click="toggleShowUpstreamOutboundApiKey"
+                        class="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 transition-colors"
+                      >
+                        <EyeOff v-if="showUpstreamOutboundApiKey" class="h-4 w-4" />
+                        <Eye v-else class="h-4 w-4" />
+                      </button>
+                    </div>
+                    <p class="text-xs text-gray-400">
+                      <template v-if="upstreamOutboundApiKeyStored">已入库；留空表示不修改。</template>
+                      <template v-else-if="upstreamOutboundApiKeySet">当前值可用但未入库；保存时会迁移或覆盖。</template>
+                      <template v-else>未设置。</template>
+                    </p>
+                  </div>
+                </div>
+
+                <div class="rounded-2xl border border-gray-200 bg-gray-50/70 p-4 text-sm text-gray-600">
+                  <p class="font-medium text-gray-900">平台通用接口固定路径</p>
+                  <div class="mt-2 grid gap-2 md:grid-cols-3">
+                    <code class="rounded-lg bg-white px-3 py-2 text-xs text-gray-700 shadow-sm">/api/upstream/health</code>
+                    <code class="rounded-lg bg-white px-3 py-2 text-xs text-gray-700 shadow-sm">/api/upstream/cards/check</code>
+                    <code class="rounded-lg bg-white px-3 py-2 text-xs text-gray-700 shadow-sm">/api/upstream/cards/redeem</code>
+                  </div>
+                </div>
+              </div>
+            </TabsContent>
+
+            <TabsContent value="inbound" class="mt-0 space-y-6">
+              <div class="rounded-2xl border border-emerald-100 bg-emerald-50/60 p-4 text-sm text-emerald-900">
+                <div class="flex items-start gap-2">
+                  <div class="mt-0.5 h-2.5 w-2.5 rounded-full bg-emerald-500"></div>
+                  <div class="space-y-1">
+                    <p class="font-semibold">入站接口会把当前平台暴露成标准供应方。</p>
+                    <p class="text-emerald-800/80">其他平台可以用固定路径请求你的卡密查询与兑换能力，适合做平台间上下游。</p>
+                  </div>
+                </div>
+              </div>
+
+              <div class="grid gap-4 lg:grid-cols-2">
+                <div class="space-y-2">
+                  <div class="flex items-center gap-2">
+                    <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">入站接口开关</Label>
+                    <InfoTooltip content="启用后，外部平台可通过标准路径请求当前平台的健康检查、卡密校验和卡密兑换接口。" width-class="w-80" />
+                  </div>
+                  <Select v-model="upstreamApiEnabled" :disabled="upstreamLoading">
+                    <SelectTrigger class="h-11 bg-gray-50 border-gray-200 rounded-xl">
+                      <SelectValue placeholder="选择状态" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="true">启用</SelectItem>
+                      <SelectItem value="false">禁用</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div class="space-y-2">
+                  <div class="flex items-center gap-2">
+                    <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">入站 API Key</Label>
+                    <InfoTooltip content="请求方需要在请求头携带 X-Upstream-Key。建议为每个合作方生成独立密钥。" width-class="w-72" />
+                  </div>
+                  <div class="relative">
+                    <Input
+                      v-model="upstreamIncomingApiKey"
+                      :type="showUpstreamIncomingApiKey ? 'text' : 'password'"
+                      placeholder="留空表示不修改"
+                      class="h-11 pr-10 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all font-mono text-sm"
+                      :disabled="upstreamLoading"
+                    />
+                    <button
+                      type="button"
+                      @click="toggleShowUpstreamIncomingApiKey"
+                      class="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 transition-colors"
+                    >
+                      <EyeOff v-if="showUpstreamIncomingApiKey" class="h-4 w-4" />
+                      <Eye v-else class="h-4 w-4" />
+                    </button>
+                  </div>
+                  <p class="text-xs text-gray-400">
+                    <template v-if="upstreamIncomingApiKeyStored">已入库；留空表示不修改。</template>
+                    <template v-else-if="upstreamIncomingApiKeySet">当前值可用但未入库；保存时会迁移或覆盖。</template>
+                    <template v-else>未设置。</template>
+                  </p>
+                </div>
+              </div>
+
+              <div class="rounded-2xl border border-gray-200 bg-gray-50/70 p-4 text-sm text-gray-600">
+                <div class="flex items-center gap-2">
+                  <p class="font-medium text-gray-900">固定入站路径</p>
+                  <InfoTooltip content="这三条路径由平台统一维护，外部对接方只需要按标准路径接入即可。" width-class="w-72" />
+                </div>
+                <div class="mt-3 grid gap-2 md:grid-cols-3">
+                  <code class="rounded-lg bg-white px-3 py-2 text-xs text-gray-700 shadow-sm">GET /api/upstream/health</code>
+                  <code class="rounded-lg bg-white px-3 py-2 text-xs text-gray-700 shadow-sm">POST /api/upstream/cards/check</code>
+                  <code class="rounded-lg bg-white px-3 py-2 text-xs text-gray-700 shadow-sm">POST /api/upstream/cards/redeem</code>
+                </div>
+              </div>
+            </TabsContent>
+          </Tabs>
+
+          <div v-if="upstreamError" class="rounded-xl bg-red-50 p-4 text-red-600 border border-red-100 text-sm font-medium">
+            {{ upstreamError }}
+          </div>
+
+          <div v-if="upstreamSuccess" class="rounded-xl bg-green-50 p-4 text-green-600 border border-green-100 text-sm font-medium">
+            {{ upstreamSuccess }}
+          </div>
+
+          <div class="flex flex-col sm:flex-row gap-3">
+            <Button
+              type="button"
+              variant="outline"
+              class="w-full sm:w-auto h-11 rounded-xl"
+              :disabled="upstreamLoading"
+              @click="loadUpstreamSettings"
+            >
+              刷新
+            </Button>
+            <Button
+              type="button"
+              class="w-full sm:flex-1 h-11 rounded-xl bg-black hover:bg-gray-800 text-white shadow-lg shadow-black/5"
+              :disabled="upstreamLoading"
+              @click="saveUpstreamSettings"
+            >
+              {{ upstreamLoading ? '保存中...' : '保存上游接口配置' }}
             </Button>
           </div>
         </CardContent>
@@ -2525,6 +3024,151 @@ const savePointsWithdrawSettings = async () => {
           </CardContent>
       </Card>
       </template>
+
+      <Dialog v-model:open="channelDialogOpen">
+        <DialogContent class="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle class="text-xl font-bold text-gray-900">{{ channelDialogMode === 'create' ? '新增渠道' : '编辑渠道' }}</DialogTitle>
+            <DialogDescription class="text-gray-500">渠道 key 仅支持小写字母/数字/连字符。</DialogDescription>
+          </DialogHeader>
+
+          <div class="space-y-4 py-4">
+            <div class="space-y-2">
+              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">渠道 Key</Label>
+              <Input v-model="channelFormKey" :disabled="channelDialogMode === 'edit'" placeholder="douyin" class="h-11 bg-gray-50 border-gray-200 rounded-xl font-mono text-sm" />
+            </div>
+            <div class="space-y-2">
+              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">渠道名称</Label>
+              <Input v-model="channelFormName" placeholder="抖音渠道" class="h-11 bg-gray-50 border-gray-200 rounded-xl text-sm" />
+            </div>
+            <div class="grid gap-3 sm:grid-cols-2">
+              <div class="space-y-2">
+                <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">兑换模式</Label>
+                <Select v-model="channelFormRedeemMode">
+                  <SelectTrigger class="h-11 bg-gray-50 border-gray-200 rounded-xl">
+                    <SelectValue placeholder="请选择兑换模式" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem v-for="option in channelRedeemModeOptions" :key="option.value" :value="option.value">
+                      {{ option.label }}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div class="space-y-2">
+                <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">履约 Provider</Label>
+                <Select v-model="channelFormProviderType" :disabled="channelFormProviderOptions.length <= 1">
+                  <SelectTrigger class="h-11 bg-gray-50 border-gray-200 rounded-xl">
+                    <SelectValue placeholder="请选择 Provider" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem v-for="option in channelFormProviderOptions" :key="option.value" :value="option.value">
+                      {{ option.label }}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+                <p class="text-xs text-gray-400">
+                  <template v-if="channelFormRedeemMode === 'external-card'">外部卡密渠道可选择自定义接口或平台通用接口。</template>
+                  <template v-else>非 external-card 渠道固定使用本地履约。</template>
+                </p>
+              </div>
+            </div>
+            <div class="flex items-center justify-between p-4 bg-gray-50 rounded-2xl border border-gray-100">
+              <div class="space-y-1">
+                <p class="font-medium text-gray-900">允许回退通用码</p>
+                <p class="text-xs text-gray-500">开启后可在该渠道入口使用通用渠道兑换码。</p>
+              </div>
+              <input type="checkbox" v-model="channelFormAllowFallback" class="w-6 h-6 rounded-md border-gray-300 text-blue-600 focus:ring-blue-500" />
+            </div>
+            <div class="flex items-center justify-between p-4 bg-gray-50 rounded-2xl border border-gray-100">
+              <div class="space-y-1">
+                <p class="font-medium text-gray-900">启用</p>
+              </div>
+              <input type="checkbox" v-model="channelFormIsActive" class="w-6 h-6 rounded-md border-gray-300 text-blue-600 focus:ring-blue-500" />
+            </div>
+            <div class="space-y-2">
+              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">排序（sortOrder）</Label>
+              <Input v-model="channelFormSortOrder" type="number" class="h-11 bg-gray-50 border-gray-200 rounded-xl font-mono text-sm" />
+            </div>
+
+            <div class="flex flex-col sm:flex-row gap-3 pt-2">
+              <Button type="button" variant="outline" class="w-full sm:w-auto h-11 px-4 border-gray-200 rounded-xl" @click="channelDialogOpen = false">
+                取消
+              </Button>
+              <Button type="button" class="w-full h-11 rounded-xl bg-black hover:bg-gray-800 text-white shadow-lg shadow-black/5" @click="submitChannelDialog">
+                保存
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog v-model:open="purchaseProductDialogOpen">
+        <DialogContent class="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle class="text-xl font-bold text-gray-900">{{ purchaseProductDialogMode === 'create' ? '新增商品' : '编辑商品' }}</DialogTitle>
+            <DialogDescription class="text-gray-500">codeChannels 按优先级用英文逗号分隔，例如：paypal,common</DialogDescription>
+          </DialogHeader>
+
+          <div class="space-y-4 py-4">
+            <div class="space-y-2">
+              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">商品 Key</Label>
+              <Input v-model="purchaseProductFormKey" :disabled="purchaseProductDialogMode === 'edit'" placeholder="warranty_90" class="h-11 bg-gray-50 border-gray-200 rounded-xl font-mono text-sm" />
+            </div>
+            <div class="space-y-2">
+              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">名称</Label>
+              <Input v-model="purchaseProductFormName" placeholder="质保 90 天" class="h-11 bg-gray-50 border-gray-200 rounded-xl text-sm" />
+            </div>
+            <div class="grid grid-cols-2 gap-3">
+              <div class="space-y-2">
+                <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">价格（amount）</Label>
+                <Input v-model="purchaseProductFormAmount" placeholder="15.00" class="h-11 bg-gray-50 border-gray-200 rounded-xl font-mono text-sm" />
+              </div>
+              <div class="space-y-2">
+                <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">服务期（天）</Label>
+                <Input v-model="purchaseProductFormServiceDays" type="number" class="h-11 bg-gray-50 border-gray-200 rounded-xl font-mono text-sm" />
+              </div>
+            </div>
+            <div class="space-y-2">
+              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">订单类型（orderType）</Label>
+              <Select v-model="purchaseProductFormOrderType">
+                <SelectTrigger class="h-11 bg-gray-50 border-gray-200 rounded-xl">
+                  <SelectValue placeholder="请选择" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="warranty">warranty</SelectItem>
+                  <SelectItem value="no_warranty">no_warranty</SelectItem>
+                  <SelectItem value="anti_ban">anti_ban</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div class="space-y-2">
+              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">渠道策略（codeChannels）</Label>
+              <Input v-model="purchaseProductFormCodeChannels" placeholder="paypal,common" class="h-11 bg-gray-50 border-gray-200 rounded-xl font-mono text-sm" />
+              <p class="text-xs text-gray-400">可用渠道：{{ channels.map(c => c.key).join(', ') || '（暂无）' }}</p>
+            </div>
+            <div class="flex items-center justify-between p-4 bg-gray-50 rounded-2xl border border-gray-100">
+              <div class="space-y-1">
+                <p class="font-medium text-gray-900">上架</p>
+              </div>
+              <input type="checkbox" v-model="purchaseProductFormIsActive" class="w-6 h-6 rounded-md border-gray-300 text-blue-600 focus:ring-blue-500" />
+            </div>
+            <div class="space-y-2">
+              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">排序（sortOrder）</Label>
+              <Input v-model="purchaseProductFormSortOrder" type="number" class="h-11 bg-gray-50 border-gray-200 rounded-xl font-mono text-sm" />
+            </div>
+
+            <div class="flex flex-col sm:flex-row gap-3 pt-2">
+              <Button type="button" variant="outline" class="w-full sm:w-auto h-11 px-4 border-gray-200 rounded-xl" @click="purchaseProductDialogOpen = false">
+                取消
+              </Button>
+              <Button type="button" class="w-full h-11 rounded-xl bg-black hover:bg-gray-800 text-white shadow-lg shadow-black/5" @click="submitPurchaseProductDialog">
+                保存
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
           </div>
         </div>
       </div>

@@ -484,6 +484,7 @@ export interface Channel {
   key: string
   name: string
   redeemMode: string
+  providerType: string
   allowCommonFallback: boolean
   isActive: boolean
   isBuiltin: boolean
@@ -514,6 +515,14 @@ export interface RedemptionCode {
   reservedForUsername?: string | null
   reservedForEntryId?: number | null
   reservedAt?: string | null
+  fulfillmentMode?: string | null
+  supplierName?: string | null
+  supplierType?: string | null
+  supplierRequestId?: string | null
+  supplierStatus?: string | null
+  supplierResponseCode?: string | null
+  supplierResponseMessage?: string | null
+  supplierRedeemedAt?: string | null
 }
 
 export interface AccountRecoveryData {
@@ -1024,6 +1033,31 @@ export interface AdminTelegramSettingsResponse {
   }
 }
 
+export interface AdminUpstreamSettingsResponse {
+  upstream: {
+    providerEnabled: boolean
+    providerEnabledStored?: boolean
+    providerType: string
+    providerTypeStored?: boolean
+    supplierName: string
+    supplierNameStored?: boolean
+    baseUrl: string
+    baseUrlStored?: boolean
+    customUrl?: string
+    customUrlStored?: boolean
+    customBodyTemplate?: string
+    customBodyTemplateStored?: boolean
+    timeoutMs: number
+    timeoutMsStored?: boolean
+    outboundApiKeySet: boolean
+    outboundApiKeyStored?: boolean
+    apiEnabled: boolean
+    apiEnabledStored?: boolean
+    incomingApiKeySet: boolean
+    incomingApiKeyStored?: boolean
+  }
+}
+
 export interface RbacMenu {
   id: number
   menuKey: string
@@ -1241,6 +1275,29 @@ export const adminService = {
     return response.data
   },
 
+  async getUpstreamSettings(): Promise<AdminUpstreamSettingsResponse> {
+    const response = await api.get('/admin/upstream-settings')
+    return response.data
+  },
+
+  async updateUpstreamSettings(payload: {
+    upstream: {
+      providerEnabled: boolean
+      providerType: string
+      supplierName: string
+      baseUrl?: string
+      customUrl?: string
+      customBodyTemplate?: string
+      timeoutMs: number
+      outboundApiKey?: string
+      apiEnabled: boolean
+      incomingApiKey?: string
+    }
+  }): Promise<AdminUpstreamSettingsResponse> {
+    const response = await api.put('/admin/upstream-settings', payload)
+    return response.data
+  },
+
   async getMenus(): Promise<{ menus: RbacMenu[] }> {
     const response = await api.get('/admin/rbac/menus')
     return response.data
@@ -1348,6 +1405,8 @@ export const adminService = {
   async createChannel(payload: {
     key: string
     name: string
+    redeemMode?: string
+    providerType?: string
     allowCommonFallback?: boolean
     isActive?: boolean
     sortOrder?: number
@@ -1358,7 +1417,7 @@ export const adminService = {
 
   async updateChannel(
     key: string,
-    payload: { name?: string; allowCommonFallback?: boolean; isActive?: boolean; sortOrder?: number }
+    payload: { name?: string; redeemMode?: string; providerType?: string; allowCommonFallback?: boolean; isActive?: boolean; sortOrder?: number }
   ): Promise<{ channel: Channel }> {
     const response = await api.patch(`/admin/channels/${encodeURIComponent(key)}`, payload)
     return response.data
@@ -2029,6 +2088,17 @@ export const redemptionCodeService = {
 
   async batchDelete(ids: number[]): Promise<void> {
     await api.post('/redemption-codes/batch-delete', { ids })
+  },
+
+  async importExternal(data: { channel: string; codesText: string }): Promise<{
+    message: string
+    imported: number
+    duplicates: number
+    duplicateCodes: string[]
+    codes: RedemptionCode[]
+  }> {
+    const response = await api.post('/redemption-codes/import-external', data)
+    return response.data
   },
 
   async redeem(
