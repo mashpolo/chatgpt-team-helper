@@ -21,12 +21,12 @@
       </div>
     </div>
 
-    <div v-if="errorMessage" class="rounded-2xl border border-red-200/70 bg-red-50/60 p-4 text-sm text-red-700">
-      {{ errorMessage }}
+    <div v-if="pageError" class="rounded-2xl border border-red-200/70 bg-red-50/60 p-4 text-sm text-red-700">
+      {{ pageError }}
     </div>
 
     <div
-      v-else-if="meta && !meta.enabled"
+      v-if="meta && !meta.enabled"
       class="rounded-2xl border border-amber-200/70 bg-amber-50/70 p-5 text-sm text-amber-700"
     >
       下游售码暂未开启，请联系管理员。
@@ -65,11 +65,11 @@
               type="email"
               variant="filled"
               :disabled="loading || isSoldOut"
-              :error="email && !isValidEmail ? '请输入有效的邮箱格式' : ''"
+              :error="emailError"
             />
 
             <AppleInput
-              v-model.trim="quantityInput"
+              v-model="quantityInput"
               label="批发数量"
               placeholder="1"
               type="number"
@@ -121,7 +121,7 @@
               size="lg"
               class="w-full h-[50px]"
               :loading="loading"
-              :disabled="loading || isSoldOut || !!quantityError"
+              :disabled="loading || isSoldOut || !!emailError || !!quantityError"
             >
               {{ isSoldOut ? '库存不足' : (loading ? '正在创建订单...' : '下单') }}
             </AppleButton>
@@ -146,10 +146,11 @@ const router = useRouter()
 
 const meta = ref<DownstreamMeta | null>(null)
 const email = ref('')
-const quantityInput = ref('1')
+const quantityInput = ref<string | number>('1')
 const loading = ref(false)
-const errorMessage = ref('')
+const pageError = ref('')
 const selectedPayType = ref<'alipay' | 'wxpay'>('alipay')
+const submitAttempted = ref(false)
 
 const payTypeLabel = (value?: string) => value === 'wxpay' ? '微信支付' : '支付宝'
 const availablePayTypes = computed(() => {
@@ -161,8 +162,10 @@ const availablePayTypes = computed(() => {
   return fallback as Array<'alipay' | 'wxpay'>
 })
 
+const normalizedQuantityInput = computed(() => String(quantityInput.value ?? '').trim())
+
 const normalizedQuantity = computed(() => {
-  const parsed = Number.parseInt(quantityInput.value || '1', 10)
+  const parsed = Number.parseInt(normalizedQuantityInput.value || '1', 10)
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 1
 })
 
@@ -179,10 +182,16 @@ const isValidEmail = computed(() => {
   return EMAIL_REGEX.test(email.value.trim())
 })
 
+const emailError = computed(() => {
+  const normalizedEmail = email.value.trim()
+  if (!normalizedEmail) return submitAttempted.value ? '请输入联系方式' : ''
+  return isValidEmail.value ? '' : '请输入有效的邮箱格式'
+})
+
 const isSoldOut = computed(() => Number(meta.value?.availableCount || 0) <= 0)
 
 const quantityError = computed(() => {
-  const raw = quantityInput.value.trim()
+  const raw = normalizedQuantityInput.value
   const parsed = Number.parseInt(raw || '0', 10)
   if (!raw) return '请输入购买数量'
   if (!Number.isFinite(parsed) || parsed <= 0) return '请输入大于 0 的整数数量'
@@ -195,8 +204,10 @@ const quantityError = computed(() => {
   return ''
 })
 
-const loadMeta = async () => {
-  errorMessage.value = ''
+const loadMeta = async ({ preservePageError = false }: { preservePageError?: boolean } = {}) => {
+  if (!preservePageError) {
+    pageError.value = ''
+  }
   try {
     meta.value = await downstreamService.getMeta()
     if (availablePayTypes.value.length > 0 && !availablePayTypes.value.includes(selectedPayType.value)) {
@@ -213,35 +224,30 @@ const loadMeta = async () => {
       quantityInput.value = String(maxAllowedQuantity)
     }
   } catch (error: any) {
-    errorMessage.value = error?.response?.data?.error || '加载下游售码信息失败，请稍后重试'
+    pageError.value = error?.response?.data?.error || '加载下游售码信息失败，请稍后重试'
   }
 }
 
 const handleSubmit = async () => {
-  errorMessage.value = ''
+  submitAttempted.value = true
+  pageError.value = ''
   const normalizedEmail = email.value.trim()
-  if (!normalizedEmail) {
-    errorMessage.value = '请输入联系方式'
-    return
-  }
-  if (!EMAIL_REGEX.test(normalizedEmail)) {
-    errorMessage.value = '请输入有效的邮箱格式'
+  if (emailError.value) {
     return
   }
   if (!meta.value?.enabled) {
-    errorMessage.value = '下游售码暂未开启'
+    pageError.value = '下游售码暂未开启'
     return
   }
   if (availablePayTypes.value.length <= 0) {
-    errorMessage.value = '当前暂无可用支付方式'
+    pageError.value = '当前暂无可用支付方式'
     return
   }
   if (isSoldOut.value) {
-    errorMessage.value = '可用库存不足，请稍后再试'
+    pageError.value = '可用库存不足，请稍后再试'
     return
   }
   if (quantityError.value) {
-    errorMessage.value = quantityError.value
     return
   }
 
@@ -260,8 +266,8 @@ const handleSubmit = async () => {
       }
     })
   } catch (error: any) {
-    errorMessage.value = error?.response?.data?.error || '创建订单失败，请稍后重试'
-    await loadMeta()
+    pageError.value = error?.response?.data?.error || '创建订单失败，请稍后重试'
+    await loadMeta({ preservePageError: true })
   } finally {
     loading.value = false
   }

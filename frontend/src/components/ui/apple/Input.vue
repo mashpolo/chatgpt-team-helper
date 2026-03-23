@@ -44,7 +44,7 @@
 
       <!-- 清除按钮 -->
       <button
-        v-if="clearable && modelValue && !disabled && !readonly"
+        v-if="clearable && modelValueText && !disabled && !readonly"
         type="button"
         class="apple-input-clear"
         @click="handleClear"
@@ -99,8 +99,8 @@
 
     <!-- 字符计数 -->
     <div v-if="showCount && maxLength" class="apple-input-count">
-      <span :class="{ 'text-red-500': modelValue.length > maxLength }">
-        {{ modelValue.length }}
+      <span :class="{ 'text-red-500': modelValueText.length > maxLength }">
+        {{ modelValueText.length }}
       </span>
       / {{ maxLength }}
     </div>
@@ -108,12 +108,12 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, type PropType } from 'vue'
+import { ref, computed, onMounted, type PropType } from 'vue'
 
 // 定义属性
 const props = defineProps({
   modelValue: {
-    type: String,
+    type: [String, Number] as PropType<string | number>,
     default: ''
   },
   type: {
@@ -162,6 +162,8 @@ const modelValue = computed({
   get: () => props.modelValue,
   set: (val) => emit('update:modelValue', val)
 })
+
+const modelValueText = computed(() => String(modelValue.value ?? ''))
 
 // 计算类名
 const wrapperClasses = computed(() => [
