@@ -393,6 +393,114 @@ const recordAccountRecovery = (db, payload) => {
   )
 }
 
+const loadOccupiedRecoveryAccountEmails = (db, redeemerEmail, { threshold, excludeOriginalCodeId } = {}) => {
+  if (!db) return []
+
+  const normalizedRedeemerEmail = normalizeEmail(redeemerEmail)
+  if (!normalizedRedeemerEmail) return []
+
+  const normalizedThreshold = String(threshold || `-${ACCOUNT_RECOVERY_WINDOW_DAYS} days`).trim() || `-${ACCOUNT_RECOVERY_WINDOW_DAYS} days`
+  const emailPattern = `%email:${normalizedRedeemerEmail}%`
+  const result = db.exec(
+    `
+      WITH candidates AS (
+        SELECT
+          rc.id AS original_code_id,
+          rc.account_email AS original_account_email,
+          COALESCE(
+            NULLIF((
+              SELECT po2.order_type
+              FROM purchase_orders po2
+              WHERE (po2.code_id = rc.id OR (po2.code_id IS NULL AND po2.code = rc.code))
+              ORDER BY po2.created_at DESC
+              LIMIT 1
+            ), ''),
+            NULLIF(rc.order_type, ''),
+            'warranty'
+          ) AS order_type,
+          (
+            SELECT po3.status
+            FROM purchase_orders po3
+            WHERE (po3.code_id = rc.id OR (po3.code_id IS NULL AND po3.code = rc.code))
+            ORDER BY po3.created_at DESC
+            LIMIT 1
+          ) AS purchase_order_status,
+          (
+            SELECT po4.refunded_at
+            FROM purchase_orders po4
+            WHERE (po4.code_id = rc.id OR (po4.code_id IS NULL AND po4.code = rc.code))
+            ORDER BY po4.created_at DESC
+            LIMIT 1
+          ) AS purchase_order_refunded_at,
+          (
+            SELECT ar.recovery_account_email
+            FROM account_recovery_logs ar
+            WHERE ar.original_code_id = rc.id
+              AND ar.status IN ('success', 'skipped')
+            ORDER BY ar.id DESC
+            LIMIT 1
+          ) AS last_completed_recovery_account_email,
+          co.status AS credit_order_status,
+          co.refunded_at AS credit_order_refunded_at
+        FROM redemption_codes rc
+        LEFT JOIN credit_orders co
+          ON co.order_no = rc.reserved_for_order_no
+          AND co.scene = 'open_accounts_board'
+        LEFT JOIN account_recovery_logs ar_recovery
+          ON ar_recovery.recovery_code_id = rc.id
+          AND ar_recovery.status IN ('success', 'skipped')
+        WHERE rc.is_redeemed = 1
+          AND rc.redeemed_at IS NOT NULL
+          AND ${ACCOUNT_RECOVERY_ELIGIBLE_CODE_SQL}
+          AND rc.redeemed_at >= DATETIME('now', 'localtime', ?)
+          AND ar_recovery.id IS NULL
+          AND (
+            lower(trim(rc.redeemed_by)) = ?
+            OR lower(trim(rc.redeemed_by)) LIKE ?
+          )
+      )
+      SELECT
+        original_code_id,
+        COALESCE(
+          NULLIF(lower(trim(last_completed_recovery_account_email)), ''),
+          lower(trim(original_account_email))
+        ) AS current_account_email,
+        order_type,
+        purchase_order_status,
+        purchase_order_refunded_at,
+        credit_order_status,
+        credit_order_refunded_at
+      FROM candidates
+      ORDER BY original_code_id ASC
+    `,
+    [normalizedThreshold, normalizedRedeemerEmail, emailPattern]
+  )
+
+  const rows = result[0]?.values || []
+  const occupiedEmails = new Set()
+
+  for (const row of rows) {
+    const originalCodeId = Number(row[0] || 0)
+    if (excludeOriginalCodeId && originalCodeId === excludeOriginalCodeId) continue
+
+    const orderType = row[2] ? String(row[2]) : null
+    if (normalizeOrderType(orderType) === ORDER_TYPE_NO_WARRANTY) continue
+
+    const purchaseStatus = String(row[3] || '').trim().toLowerCase()
+    const purchaseRefundedAt = row[4]
+    if (purchaseRefundedAt || purchaseStatus === 'refunded') continue
+
+    const creditStatus = String(row[5] || '').trim().toLowerCase()
+    const creditRefundedAt = row[6]
+    if (creditRefundedAt || creditStatus === 'refunded') continue
+
+    const currentAccountEmail = normalizeEmail(row[1])
+    if (currentAccountEmail) occupiedEmails.add(currentAccountEmail)
+  }
+
+  return Array.from(occupiedEmails)
+}
+
 const getUserWithRoles = (db, userId) => {
   const userResult = db.exec(
     `
@@ -3870,6 +3978,11 @@ router.post('/account-recovery/recover', async (req, res) => {
         const recoverySettings = await getAccountRecoverySettings(db)
         const codeCreatedWithinDays = Math.max(1, toInt(recoverySettings?.effective?.codeCreatedWithinDays, 7))
         const requireExpireCoverDeadline = Boolean(recoverySettings?.effective?.requireExpireCoverDeadline)
+        // 避免同一客户名下的多笔有效订单在后台/一键补录时被分配到同一个账号上。
+        const occupiedRecoveryAccountEmails = loadOccupiedRecoveryAccountEmails(db, redeemedBy, {
+          threshold,
+          excludeOriginalCodeId: originalCodeId
+        })
         const triedRecoveryCodeIds = new Set()
         let lastAttemptError = null
         let lastAttemptRecovery = null
@@ -3882,7 +3995,8 @@ router.post('/account-recovery/recover', async (req, res) => {
             preferLatestExpire: !requireExpireCoverDeadline,
             limit: 200,
             codeCreatedWithinDays,
-            excludeCodeIds: Array.from(triedRecoveryCodeIds)
+            excludeCodeIds: Array.from(triedRecoveryCodeIds),
+            excludeAccountEmails: occupiedRecoveryAccountEmails
           })
           if (!selectedRecovery) break
 

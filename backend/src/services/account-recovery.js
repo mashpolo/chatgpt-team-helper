@@ -41,6 +41,7 @@ const resolveDefaultServiceDays = (orderType) => (
 )
 
 const pad2 = (value) => String(value).padStart(2, '0')
+const normalizeEmail = (value) => String(value ?? '').trim().toLowerCase()
 
 const addDays = (date, days) => {
   const base = date instanceof Date ? date.getTime() : new Date(date).getTime()
@@ -140,6 +141,7 @@ export function selectRecoveryCode(
     preferLatestExpire = false,
     limit = 200,
     excludeCodeIds,
+    excludeAccountEmails,
     codeCreatedWithinDays
   } = {}
 ) {
@@ -159,6 +161,13 @@ export function selectRecoveryCode(
         excludeCodeIds
           .map(value => Number(value))
           .filter(value => Number.isFinite(value) && value > 0)
+      )
+    : null
+  const excludedAccountEmails = Array.isArray(excludeAccountEmails)
+    ? new Set(
+        excludeAccountEmails
+          .map(value => normalizeEmail(value))
+          .filter(Boolean)
       )
     : null
   const orderSql = preferLatestExpire
@@ -214,9 +223,11 @@ export function selectRecoveryCode(
     const expireAtRaw = row[3] ? String(row[3]).trim() : ''
     const isToday = Number(row[4] || 0) === 1
     const occupancy = Number(row[5] || 0)
+    const normalizedRecoveryAccountEmail = normalizeEmail(recoveryAccountEmail)
 
     if (!recoveryCodeId || !recoveryCode || !recoveryAccountEmail || !expireAtRaw) continue
     if (excludedCodeIds && excludedCodeIds.has(recoveryCodeId)) continue
+    if (excludedAccountEmails && excludedAccountEmails.has(normalizedRecoveryAccountEmail)) continue
 
     const expireAtMs = parseExpireAtToMs(expireAtRaw)
     if (expireAtMs == null || expireAtMs < effectiveMinExpireMs) continue

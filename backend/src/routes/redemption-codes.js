@@ -351,6 +351,22 @@ const recordAccountRecovery = (db, payload) => {
   )
 }
 
+const collectOccupiedRecoveryAccountEmails = (candidates) => {
+  if (!Array.isArray(candidates) || candidates.length === 0) return []
+
+  const emails = new Set()
+  for (const candidate of candidates) {
+    const accountEmail = normalizeEmail(
+      candidate?.currentAccountRecordEmail
+      || candidate?.currentAccountEmail
+      || candidate?.lastCompletedRecoveryAccountEmail
+      || candidate?.originalAccountEmail
+    )
+    if (accountEmail) emails.add(accountEmail)
+  }
+  return Array.from(emails)
+}
+
 const truncateSupplierPayload = (value, maxLength = 5000) => {
   const raw = String(value || '')
   return raw.length > maxLength ? raw.slice(0, maxLength) : raw
@@ -2223,6 +2239,8 @@ router.post('/recover', async (req, res) => {
         const recoverySettings = await getAccountRecoverySettings(db)
         const codeCreatedWithinDays = Math.max(1, toInt(recoverySettings?.effective?.codeCreatedWithinDays, 7))
         const requireExpireCoverDeadline = Boolean(recoverySettings?.effective?.requireExpireCoverDeadline)
+        // 同一购买邮箱下的其他有效订单已经占用的账号，不应在补录时再次分配回来。
+        const occupiedRecoveryAccountEmails = collectOccupiedRecoveryAccountEmails(refundableCandidates)
         const skipCodeFormatValidation = false
         const triedRecoveryCodeIds = new Set()
         let lastAttemptError = null
@@ -2236,7 +2254,8 @@ router.post('/recover', async (req, res) => {
             preferLatestExpire: !requireExpireCoverDeadline,
             limit: 200,
             codeCreatedWithinDays,
-            excludeCodeIds: Array.from(triedRecoveryCodeIds)
+            excludeCodeIds: Array.from(triedRecoveryCodeIds),
+            excludeAccountEmails: occupiedRecoveryAccountEmails
           })
 
           if (!selectedRecovery) break
