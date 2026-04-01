@@ -11,6 +11,7 @@ export default defineConfig(({ mode }) => {
     .split(',')
     .map(host => host.trim())
     .filter(Boolean)
+  const devApiTarget = (env.VITE_DEV_API_TARGET || 'http://127.0.0.1:3000').trim()
 
   return {
     plugins: [
@@ -28,7 +29,13 @@ export default defineConfig(({ mode }) => {
     server: {
       host: '0.0.0.0',
       port: 5173,
-      allowedHosts: ['localhost', '127.0.0.1', ...additionalAllowedHosts]
+      allowedHosts: ['localhost', '127.0.0.1', ...additionalAllowedHosts],
+      proxy: {
+        '/api': {
+          target: devApiTarget,
+          changeOrigin: true,
+        }
+      }
     },
     build: {
       // 生产构建优化

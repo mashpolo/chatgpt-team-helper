@@ -164,6 +164,84 @@ const ensureIndex = (database, indexName, createSql) => {
   }
 }
 
+const getConfiguredAdminPasswords = () => {
+  const initPassword = String(process.env.INIT_ADMIN_PASSWORD || '').trim()
+  const overridePassword = String(process.env.ADMIN_PASSWORD || '').trim()
+  return {
+    initPassword,
+    overridePassword,
+    bootstrapPassword: initPassword || overridePassword,
+  }
+}
+
+const passwordMatchesHash = (plainPassword, hashedPassword) => {
+  if (!plainPassword || !hashedPassword) return false
+  try {
+    return bcrypt.compareSync(plainPassword, hashedPassword)
+  } catch {
+    return false
+  }
+}
+
+const syncAdminPasswordFromEnv = (database, adminUserId, plainPassword, sourceLabel) => {
+  if (!database || !adminUserId || !plainPassword) return false
+  const passwordResult = database.exec('SELECT password FROM users WHERE id = ? LIMIT 1', [adminUserId])
+  const currentHash = String(passwordResult?.[0]?.values?.[0]?.[0] || '')
+  if (passwordMatchesHash(plainPassword, currentHash)) {
+    return false
+  }
+
+  const nextHash = bcrypt.hashSync(plainPassword, 10)
+  database.run(
+    'UPDATE users SET password = ? WHERE id = ?',
+    [nextHash, adminUserId]
+  )
+  console.log(`[Auth] admin 密码已按环境变量 ${sourceLabel} 同步更新`)
+  return true
+}
+
+const ensureAdminUser = (database) => {
+  if (!database) return false
+
+  const adminUserResult = database.exec('SELECT id, password FROM users WHERE username = ? LIMIT 1', ['admin'])
+  const adminUserRow = adminUserResult?.[0]?.values?.[0] || null
+  const adminUserId = adminUserRow?.[0] || null
+  const adminPasswordHash = String(adminUserRow?.[1] || '')
+  const adminUserExists = Boolean(adminUserRow)
+  const { initPassword: initAdminPassword, overridePassword: overrideAdminPassword, bootstrapPassword } = getConfiguredAdminPasswords()
+
+  if (!adminUserExists) {
+    const generatedPassword = crypto.randomBytes(16).toString('hex')
+    const plainPassword = bootstrapPassword || generatedPassword
+    const hashedPassword = bcrypt.hashSync(plainPassword, 10)
+    database.run(
+      `INSERT INTO users (username, password, email, created_at) VALUES (?, ?, ?, DATETIME('now', 'localtime'))`,
+      ['admin', hashedPassword, 'admin@example.com']
+    )
+
+    console.log('默认管理员用户已创建: username=admin')
+    if (initAdminPassword) {
+      console.log('初始密码已从环境变量 INIT_ADMIN_PASSWORD 读取')
+    } else if (overrideAdminPassword) {
+      console.log('初始密码已从环境变量 ADMIN_PASSWORD 读取')
+    } else {
+      console.log('初始密码(随机生成):', plainPassword)
+    }
+    console.log('请尽快登录后台修改密码')
+    return true
+  }
+
+  if (overrideAdminPassword) {
+    return syncAdminPasswordFromEnv(database, adminUserId, overrideAdminPassword, 'ADMIN_PASSWORD')
+  }
+
+  if (initAdminPassword && !passwordMatchesHash(initAdminPassword, adminPasswordHash)) {
+    console.warn('[Auth] 检测到 INIT_ADMIN_PASSWORD 已设置，但现有 admin 用户不会使用该值覆盖密码；如需重置现有管理员密码，请改用 ADMIN_PASSWORD。')
+  }
+
+  return false
+}
+
 const ensureRbacTables = (database) => {
   let changed = false
 
@@ -2521,6 +2599,11 @@ export async function initDatabase() {
 	          await saveDatabase()
 	        }
 
+          const adminUserChanged = ensureAdminUser(database)
+          if (adminUserChanged) {
+            await saveDatabase()
+          }
+
         return
       }
     } catch (err) {
@@ -2713,29 +2796,7 @@ export async function initDatabase() {
 	    console.log('列检查/添加已跳过:', err.message)
 	  }
 
-  // Check if admin user exists
-  const adminUserResult = database.exec('SELECT id FROM users WHERE username = ? LIMIT 1', ['admin'])
-  const adminUserExists = Boolean(adminUserResult?.[0]?.values?.length)
-
-  if (!adminUserExists) {
-    // Create default admin user
-    const envPassword = String(process.env.INIT_ADMIN_PASSWORD || process.env.ADMIN_PASSWORD || '').trim()
-    const generatedPassword = crypto.randomBytes(16).toString('hex')
-    const plainPassword = envPassword || generatedPassword
-    const hashedPassword = bcrypt.hashSync(plainPassword, 10)
-    database.run(
-      `INSERT INTO users (username, password, email, created_at) VALUES (?, ?, ?, DATETIME('now', 'localtime'))`,
-      ['admin', hashedPassword, 'admin@example.com']
-    )
-
-    console.log('默认管理员用户已创建: username=admin')
-    if (envPassword) {
-      console.log('初始密码已从环境变量 INIT_ADMIN_PASSWORD 读取')
-    } else {
-      console.log('初始密码(随机生成):', plainPassword)
-    }
-    console.log('请尽快登录后台修改密码')
-  }
+  ensureAdminUser(database)
 
   ensureRbacTables(database)
 

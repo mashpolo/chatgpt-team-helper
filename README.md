@@ -122,6 +122,9 @@ JWT_SECRET=你的随机密钥
 # 管理员初始密码（可选，不设则首次启动随机生成并输出到日志）
 INIT_ADMIN_PASSWORD=你的初始密码
 
+# 如数据库里已经存在 admin 用户，使用该变量可在启动时强制同步管理员密码
+# ADMIN_PASSWORD=你的新密码
+
 # 如前后端分离部署，配置允许的前端域名
 CORS_ORIGINS=https://你的域名
 ```
@@ -145,6 +148,8 @@ docker compose up -d
   ```bash
   docker compose logs app | grep -i password
   ```
+
+> 如果你是在数据库已经生成之后才修改密码配置，`INIT_ADMIN_PASSWORD` 不会覆盖现有管理员密码。此时请改用 `ADMIN_PASSWORD` 并重启服务，或者在后台登录后手动修改密码。
 
 #### 数据持久化
 

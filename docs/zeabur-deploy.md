@@ -21,6 +21,7 @@
 |-----|-------|
 | `JWT_SECRET` | `你的随机密钥至少32位` |
 | `INIT_ADMIN_PASSWORD` | `你的管理员密码` |
+| `ADMIN_PASSWORD` | `已有数据库时用于重置 admin 密码（可选）` |
 
 > 注意：JWT_SECRET 建议使用 `openssl rand -base64 32` 生成
 
@@ -53,6 +54,8 @@
 - 用户名：`admin`
 - 密码：你设置的 `INIT_ADMIN_PASSWORD` 值
 
+> 如果服务已经跑过并生成了数据库，后续再修改 `INIT_ADMIN_PASSWORD` 不会覆盖旧密码。此时请改用 `ADMIN_PASSWORD` 后重新部署。
+
 ---
 
 ## 环境变量汇总（必填）
@@ -60,6 +63,7 @@
 ```env
 JWT_SECRET=你的随机密钥至少32位
 INIT_ADMIN_PASSWORD=你的管理员密码
+# ADMIN_PASSWORD=已有数据库时用于重置 admin 密码
 ```
 
 ## 其他可选配置

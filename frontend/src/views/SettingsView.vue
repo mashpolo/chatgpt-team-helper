@@ -24,6 +24,7 @@ import {
   Dialog,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
@@ -332,6 +333,9 @@ const proxyTestFailed = ref(0)
 const proxyTestResults = ref<AdminProxyTestResult[]>([])
 const proxyRows = ref<ProxyRow[]>([createProxyRow()])
 const proxyLastTestedProxyUrls = ref('')
+const proxyBatchDialogOpen = ref(false)
+const proxyBatchInput = ref('')
+const proxyBatchError = ref('')
 const parseProxyEntries = (value?: string | null) => (
   String(value || '')
     .split(/[\n,;]+/g)
@@ -401,6 +405,69 @@ const resetProxyTestState = () => {
 }
 const addProxyRow = () => {
   proxyRows.value = [...proxyRows.value, createProxyRow()]
+}
+const openProxyBatchDialog = () => {
+  proxyBatchInput.value = ''
+  proxyBatchError.value = ''
+  proxyBatchDialogOpen.value = true
+}
+const closeProxyBatchDialog = () => {
+  proxyBatchDialogOpen.value = false
+  proxyBatchInput.value = ''
+  proxyBatchError.value = ''
+}
+const appendProxyRows = (input?: string | null) => {
+  const incomingEntries = parseProxyEntries(input)
+  if (!incomingEntries.length) {
+    return { appended: 0, total: proxyRows.value.filter(row => row.value.trim()).length }
+  }
+
+  const existingEntries = proxyRows.value
+    .map(row => row.value.trim())
+    .filter(Boolean)
+  const existingSet = new Set(existingEntries)
+  const appendedEntries: string[] = []
+
+  for (const entry of incomingEntries) {
+    if (existingSet.has(entry)) continue
+    existingSet.add(entry)
+    appendedEntries.push(entry)
+  }
+
+  if (!existingEntries.length) {
+    const combinedEntries = [...appendedEntries]
+    proxyRows.value = combinedEntries.length
+      ? combinedEntries.map(entry => createProxyRow(entry))
+      : [createProxyRow()]
+    return { appended: appendedEntries.length, total: combinedEntries.length }
+  }
+
+  if (appendedEntries.length) {
+    proxyRows.value = [
+      ...proxyRows.value,
+      ...appendedEntries.map(entry => createProxyRow(entry))
+    ]
+  }
+
+  return { appended: appendedEntries.length, total: existingSet.size }
+}
+const applyProxyBatchInput = () => {
+  proxyBatchError.value = ''
+  const parsedEntries = parseProxyEntries(proxyBatchInput.value)
+  if (!parsedEntries.length) {
+    proxyBatchError.value = '请先输入至少一个代理'
+    return
+  }
+
+  const { appended } = appendProxyRows(proxyBatchInput.value)
+  if (!appended) {
+    proxyBatchError.value = '输入的代理已全部存在，无需重复添加'
+    return
+  }
+
+  proxySuccess.value = `已批量新增 ${appended} 条代理`
+  setTimeout(() => (proxySuccess.value = ''), 3000)
+  closeProxyBatchDialog()
 }
 const removeProxyRow = (index: number) => {
   if (proxyRows.value.length <= 1) {
@@ -2416,6 +2483,15 @@ watch(activeTab, (next) => {
                   variant="outline"
                   class="h-9 rounded-xl border-gray-200 bg-white px-3"
                   :disabled="proxyLoading || proxyTesting"
+                  @click="openProxyBatchDialog"
+                >
+                  批量新增
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  class="h-9 rounded-xl border-gray-200 bg-white px-3"
+                  :disabled="proxyLoading || proxyTesting"
                   @click="addProxyRow"
                 >
                   <Plus class="mr-2 h-4 w-4" />
@@ -3889,6 +3965,43 @@ watch(activeTab, (next) => {
               </Button>
             </div>
           </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog v-model:open="proxyBatchDialogOpen" @update:open="(open) => { if (!open) closeProxyBatchDialog() }">
+        <DialogContent class="sm:max-w-[640px]">
+          <DialogHeader>
+            <DialogTitle class="text-xl font-bold text-gray-900">批量新增代理</DialogTitle>
+            <DialogDescription class="text-gray-500">
+              支持按换行、英文逗号或分号分隔，重复代理会自动跳过。
+            </DialogDescription>
+          </DialogHeader>
+
+          <div class="space-y-4 py-4">
+            <div class="space-y-2">
+              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">代理列表</Label>
+              <textarea
+                v-model="proxyBatchInput"
+                rows="10"
+                placeholder="socks5h://127.0.0.1:1080&#10;http://user:pass@127.0.0.1:8080"
+                class="w-full rounded-2xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm font-mono text-gray-900 outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+              ></textarea>
+              <p class="text-xs text-gray-400">导入后仍可在下方逐条编辑、测试和删除。</p>
+            </div>
+
+            <div v-if="proxyBatchError" class="rounded-xl bg-red-50 p-4 text-sm font-medium text-red-600 border border-red-100">
+              {{ proxyBatchError }}
+            </div>
+          </div>
+
+          <DialogFooter class="pt-0">
+            <Button type="button" variant="outline" class="w-full sm:w-auto h-11 px-4 border-gray-200 rounded-xl" @click="closeProxyBatchDialog">
+              取消
+            </Button>
+            <Button type="button" class="w-full sm:w-auto h-11 rounded-xl bg-black hover:bg-gray-800 text-white shadow-lg shadow-black/5" @click="applyProxyBatchInput">
+              开始导入
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
           </div>

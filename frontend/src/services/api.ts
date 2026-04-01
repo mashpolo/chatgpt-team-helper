@@ -1,22 +1,15 @@
 import axios from 'axios'
 
 // 动态获取 API URL
-// 生产环境使用相对路径，自动使用当前域名
-// 开发环境使用 localhost
+// 优先使用显式环境变量，其余场景统一走相对路径
+// 开发环境由 Vite 代理转发到后端，避免 localhost/跨域问题
 const getApiUrl = () => {
   // 如果有环境变量配置，优先使用
   if (import.meta.env.VITE_API_URL) {
     return import.meta.env.VITE_API_URL
   }
 
-  // 生产环境：使用相对路径（会自动使用当前域名）
-  if (import.meta.env.PROD) {
-    // 如果部署在子路径，可以在这里配置
-    return '/api'
-  }
-
-  // 开发环境：使用 localhost
-  return 'http://localhost:3000/api'
+  return '/api'
 }
 
 export const API_URL = getApiUrl()
