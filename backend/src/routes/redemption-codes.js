@@ -34,6 +34,7 @@ import { buildAccountRecoveryEligibleCodeSql, resolveOrderDeadlineMs, selectReco
 import { getAccountRecoverySettings } from '../utils/account-recovery-settings.js'
 import { getAccountRecoveryAccessCache, setAccountRecoveryAccessCache } from '../utils/account-recovery-access-cache.js'
 import { checkViaUpstreamProvider, redeemViaUpstreamProvider } from '../services/upstream-provider.js'
+import { getAvailableRedemptionCodeSlots, getAccountOccupancy } from '../utils/account-capacity.js'
 
 const router = express.Router()
 const ACCOUNT_RECOVERY_ELIGIBLE_CODE_SQL = buildAccountRecoveryEligibleCodeSql('rc')
@@ -1464,7 +1465,7 @@ router.post('/batch', authenticateToken, requireMenu('redemption_codes'), async 
 
     // 检查账号是否存在并获取当前人数
     const accountResult = db.exec(`
-      SELECT id, email, user_count FROM gpt_accounts WHERE email = ?
+      SELECT id, email, user_count, invite_count FROM gpt_accounts WHERE email = ?
     `, [accountEmail])
 
     if (accountResult.length === 0 || accountResult[0].values.length === 0) {
@@ -1473,12 +1474,14 @@ router.post('/batch', authenticateToken, requireMenu('redemption_codes'), async 
 
     const accountRow = accountResult[0].values[0]
     const currentUserCount = accountRow[2] || 0
+    const currentInviteCount = accountRow[3] || 0
 
-    // 如果账号已满员（5人），不能创建兑换码
-    if (currentUserCount >= 5) {
+    // 如果账号已满员（当前人数 + 待加入人数已达到上限），不能创建兑换码
+    if (getAccountOccupancy({ userCount: currentUserCount, inviteCount: currentInviteCount }) >= 5) {
       return res.status(400).json({
-        error: '该账号已满员（5人），无法创建兑换码',
-        currentUserCount: currentUserCount
+        error: '该账号已满员（当前人数 + 待加入人数已达上限），无法创建兑换码',
+        currentUserCount,
+        inviteCount: currentInviteCount
       })
     }
 
@@ -1491,15 +1494,19 @@ router.post('/batch', authenticateToken, requireMenu('redemption_codes'), async 
     const unusedCodesCount = unusedCodesResult[0]?.values[0]?.[0] || 0
 
     // 计算实际可以生成的数量
-    // 可创建数量 = 总容量(5) - 当前人数 - 未使用的兑换码数
-    const totalCapacity = 5
-    const availableSlots = totalCapacity - currentUserCount - unusedCodesCount
+    // 可创建数量 = 总容量(5) - 当前人数 - 待加入人数 - 未使用兑换码数
+    const availableSlots = getAvailableRedemptionCodeSlots({
+      userCount: currentUserCount,
+      inviteCount: currentInviteCount,
+      unusedCodesCount,
+    })
 
     if (availableSlots <= 0) {
       return res.status(400).json({
-        error: '该账号已无可用名额（当前人数 + 未使用兑换码数已达上限）',
-        currentUserCount: currentUserCount,
-        unusedCodesCount: unusedCodesCount,
+        error: '该账号已无可用名额（当前人数 + 待加入人数 + 未使用兑换码数已达上限）',
+        currentUserCount,
+        inviteCount: currentInviteCount,
+        unusedCodesCount,
         allCodesCount: unusedCodesCount, // 兼容旧前端字段
         availableSlots: 0
       })
@@ -1509,7 +1516,7 @@ router.post('/batch', authenticateToken, requireMenu('redemption_codes'), async 
 
     // 如果请求数量超过可用名额，给出详细提示
     if (count > availableSlots) {
-      console.log(`请求生成${count}个兑换码，但账号只有${availableSlots}个可用名额（当前${currentUserCount}人，已有${unusedCodesCount}个未使用兑换码），将只生成${actualCount}个`)
+      console.log(`请求生成${count}个兑换码，但账号只有${availableSlots}个可用名额（当前${currentUserCount}人，待加入${currentInviteCount}人，已有${unusedCodesCount}个未使用兑换码），将只生成${actualCount}个`)
     }
 
     const normalizedChannel = normalizeChannel(channel, 'common')

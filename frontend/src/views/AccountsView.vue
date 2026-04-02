@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, onUnmounted, nextTick, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { API_URL, authService, gptAccountService, openaiOAuthService, userService, type AccountStatus, type CheckAccountStatusItem, type CheckAccountStatusResponse, type GptAccount, type CreateGptAccountDto, type SyncUserCountResponse, type GptAccountsListParams, type ChatgptAccountInviteItem, type ChatgptAccountCheckInfo, type OpenAIOAuthSession, type OpenAIOAuthExchangeResult } from '@/services/api'
+import { API_URL, authService, gptAccountService, openaiOAuthService, userService, type AccountStatus, type CheckAccountStatusItem, type CheckAccountStatusResponse, type GptAccount, type CreateGptAccountDto, type CreateGptAccountResponse, type SyncUserCountResponse, type GptAccountsListParams, type ChatgptAccountInviteItem, type ChatgptAccountCheckInfo, type OpenAIOAuthSession, type OpenAIOAuthExchangeResult } from '@/services/api'
 import { formatShanghaiDate } from '@/lib/datetime'
 import { useAppConfigStore } from '@/stores/appConfig'
 import {
@@ -989,8 +989,8 @@ const handleSubmit = async () => {
       await gptAccountService.update(editingAccount.value.id, payload)
       showSuccessToast('账号更新成功')
     } else {
-      await gptAccountService.create(payload)
-      showSuccessToast('账号创建成功')
+      const result: CreateGptAccountResponse = await gptAccountService.create(payload)
+      showSuccessToast(result?.message || '账号创建成功')
     }
     await loadAccounts()
     closeDialog()

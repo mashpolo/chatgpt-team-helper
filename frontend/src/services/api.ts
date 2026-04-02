@@ -368,6 +368,14 @@ export interface CreateGptAccountDto {
   remark?: string | null
 }
 
+export interface CreateGptAccountResponse {
+  account: GptAccount
+  generatedCodes: string[]
+  removedCodesCount?: number
+  syncWarning?: string | null
+  message: string
+}
+
 export interface ChatgptAccountCheckInfo {
   accountId: string
   name: string
@@ -419,6 +427,14 @@ export interface SyncUserCountResponse {
   account: GptAccount
   syncedUserCount: number
   inviteCount?: number
+  codeAdjustments?: {
+    generatedCount?: number
+    removedCount?: number
+    targetUnusedCount?: number
+    actualUnusedCount?: number
+    overflowCount?: number
+    warning?: string | null
+  }
   users: ChatgptAccountUsersResponse
 }
 
@@ -1813,7 +1829,7 @@ export const gptAccountService = {
     return response.data
   },
 
-  async create(data: CreateGptAccountDto): Promise<GptAccount> {
+  async create(data: CreateGptAccountDto): Promise<CreateGptAccountResponse> {
     const response = await api.post('/gpt-accounts', data)
     return response.data
   },

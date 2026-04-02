@@ -6,7 +6,10 @@ import { apiKeyAuth } from '../middleware/api-key-auth.js'
 import { requireMenu } from '../middleware/rbac.js'
 import { syncAccountUserCount, syncAccountInviteCount, fetchOpenAiAccountInfo, fetchAccountUsersList, AccountSyncError, deleteAccountUser, inviteAccountUser, deleteAccountInvite } from '../services/account-sync.js'
 import { generateAccountClientProfile } from '../services/account-client-profile.js'
+import { reconcileAccountRedemptionCodes } from '../services/account-redemption-code-sync.js'
 import { invalidateAccountRecoveryAccessCache, invalidateAccountRecoveryAccessCaches } from '../utils/account-recovery-access-cache.js'
+import { getAccountOccupancy } from '../utils/account-capacity.js'
+import { withLocks } from '../utils/locks.js'
 
 const router = express.Router()
 const OPENAI_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann'
@@ -31,6 +34,12 @@ const normalizeOptionalString = (value) => {
   if (value == null) return null
   const normalized = String(value).trim()
   return normalized || null
+}
+
+const normalizeNonNegativeInteger = (value, fallback = 0) => {
+  const parsed = Number.parseInt(String(value ?? ''), 10)
+  if (!Number.isFinite(parsed) || parsed < 0) return fallback
+  return parsed
 }
 
 const EXPIRE_AT_REGEX = /^\d{4}\/\d{2}\/\d{2} \d{2}:\d{2}:\d{2}$/
@@ -761,8 +770,7 @@ router.post('/', async (req, res) => {
 
     const db = await getDatabase()
 
-    // 设置默认人数为1而不是0
-    const finalUserCount = userCount !== undefined ? userCount : 1
+    const initialUserCount = normalizeNonNegativeInteger(userCount, 0)
     const generatedClientProfile = generateAccountClientProfile(normalizedEmail, normalizedOaiDeviceId)
 
     db.run(
@@ -771,7 +779,7 @@ router.post('/', async (req, res) => {
         normalizedEmail,
         token,
         refreshToken || null,
-        finalUserCount,
+        initialUserCount,
         normalizedChatgptAccountId,
         generatedClientProfile.oaiDeviceId,
         normalizedExpireAt,
@@ -785,6 +793,8 @@ router.post('/', async (req, res) => {
       ]
     )
 
+    await saveDatabase()
+
 		    // 获取新创建账号的ID
 		    const accountResult = db.exec(`
 		      SELECT id, email, token, refresh_token, user_count, invite_count, chatgpt_account_id, oai_device_id, expire_at, is_open,
@@ -795,7 +805,7 @@ router.post('/', async (req, res) => {
 		      WHERE id = last_insert_rowid()
 		    `)
     const row = accountResult[0].values[0]
-	    const account = {
+	    let account = {
 	      id: row[0],
 	      email: row[1],
 	      token: row[2],
@@ -813,68 +823,77 @@ router.post('/', async (req, res) => {
 		      updatedAt: row[13]
 		    }
 
-    // 生成随机兑换码的辅助函数
-    function generateRedemptionCode(length = 12) {
-      const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789' // 排除容易混淆的字符
-      let code = ''
-      for (let i = 0; i < length; i++) {
-        code += chars.charAt(Math.floor(Math.random() * chars.length))
-        // 每4位添加一个分隔符
-        if ((i + 1) % 4 === 0 && i < length - 1) {
-          code += '-'
-        }
-      }
-      return code
+    let autoCodeWarning = ''
+    try {
+      const userSync = await syncAccountUserCount(account.id, {
+        accountRecord: {
+          id: account.id,
+          email: account.email,
+          token: account.token,
+          refreshToken: account.refreshToken,
+          userCount: account.userCount,
+          inviteCount: account.inviteCount,
+          chatgptAccountId: account.chatgptAccountId,
+          oaiDeviceId: account.oaiDeviceId,
+        },
+        userListParams: { offset: 0, limit: 1, query: '' }
+      })
+      const inviteSync = await syncAccountInviteCount(account.id, {
+        accountRecord: userSync.account,
+        inviteListParams: { offset: 0, limit: 1, query: '' }
+      })
+      account = inviteSync.account
+    } catch (syncError) {
+      autoCodeWarning = '未能同步账号当前人数，已跳过自动生成兑换码'
+      console.warn('[GPT Account Create] sync counts failed, skip auto code generation', {
+        accountId: account.id,
+        email: account.email,
+        message: syncError?.message || String(syncError || '')
+      })
     }
-
-    // 自动生成兑换码并绑定到该账号
-    // Team 账号默认总容量 5，新建账号默认人数按 1 计算，所以默认生成 4 个兑换码
-    const totalCapacity = 5
-    const currentUserCountForCodes = Math.max(1, Number(finalUserCount) || 1)
-    const codesToGenerate = Math.max(0, totalCapacity - currentUserCountForCodes)
 
     const generatedCodes = []
-    for (let i = 0; i < codesToGenerate; i++) {
-      let code = generateRedemptionCode()
-      let attempts = 0
-      let success = false
+    let removedCodesCount = 0
+    if (!autoCodeWarning) {
+      const currentUserCount = Number(account.userCount || 0)
+      const currentInviteCount = Number(account.inviteCount || 0)
+      const reconcileResult = await withLocks(['purchase'], async () => (
+        reconcileAccountRedemptionCodes(db, {
+          accountEmail: normalizedEmail,
+          userCount: currentUserCount,
+          inviteCount: currentInviteCount
+        })
+      ))
 
-      // 尝试生成唯一的兑换码（最多重试5次）
-      while (attempts < 5 && !success) {
-        try {
-          db.run(
-            `INSERT INTO redemption_codes (code, account_email, created_at, updated_at) VALUES (?, ?, DATETIME('now', 'localtime'), DATETIME('now', 'localtime'))`,
-            [code, normalizedEmail]
-          )
-          generatedCodes.push(code)
-          success = true
-        } catch (err) {
-          if (err.message.includes('UNIQUE')) {
-            // 如果重复，重新生成
-            code = generateRedemptionCode()
-            attempts++
-          } else {
-            throw err
-          }
-        }
+      generatedCodes.push(...reconcileResult.generatedCodes)
+      removedCodesCount = reconcileResult.removedCount
+
+      if (reconcileResult.warning) {
+        autoCodeWarning = reconcileResult.warning
+      } else if (!generatedCodes.length && getAccountOccupancy({ userCount: currentUserCount, inviteCount: currentInviteCount }) >= 5) {
+        autoCodeWarning = '账号当前人数已接近或达到上限，未自动生成兑换码'
       }
     }
 
-    saveDatabase()
+    await saveDatabase()
 
-    // 获取生成的兑换码信息
-    const codesResult = db.exec(`
-      SELECT code FROM redemption_codes
-      WHERE account_email = ?
-      ORDER BY created_at DESC
-    `, [normalizedEmail])
-
-    const codes = codesResult[0]?.values.map(row => row[0]) || []
+    const messageParts = ['账号创建成功']
+    if (generatedCodes.length > 0) {
+      messageParts.push(`已自动生成${generatedCodes.length}个兑换码`)
+    }
+    if (removedCodesCount > 0) {
+      messageParts.push(`已回收${removedCodesCount}个多余兑换码`)
+    }
+    if (autoCodeWarning) {
+      messageParts.push(autoCodeWarning)
+    }
 
     res.status(201).json({
       account,
-      generatedCodes: codes,
-      message: `账号创建成功，已自动生成${codes.length}个兑换码`
+      generatedCodes,
+      removedCodesCount,
+      syncWarning: autoCodeWarning || null,
+      message: messageParts.join('，')
     })
   } catch (error) {
     console.error('Create GPT account error:', error)
@@ -1173,11 +1192,32 @@ router.post('/:id/sync-user-count', async (req, res) => {
 
   try {
     const { userSync, inviteSync } = await syncOnce()
+    const reconcileResult = await withLocks(['purchase'], async () => (
+      reconcileAccountRedemptionCodes(await getDatabase(), {
+        accountEmail: inviteSync.account?.email,
+        userCount: inviteSync.account?.userCount,
+        inviteCount: inviteSync.account?.inviteCount
+      })
+    ))
+    await saveDatabase()
+
+    const messageParts = ['账号同步成功']
+    if (reconcileResult.generatedCount > 0) {
+      messageParts.push(`已补充 ${reconcileResult.generatedCount} 个兑换码`)
+    }
+    if (reconcileResult.removedCount > 0) {
+      messageParts.push(`已回收 ${reconcileResult.removedCount} 个多余兑换码`)
+    }
+    if (reconcileResult.warning) {
+      messageParts.push(reconcileResult.warning)
+    }
+
     res.json({
-      message: '账号同步成功',
+      message: messageParts.join('，'),
       account: inviteSync.account,
       syncedUserCount: userSync.syncedUserCount,
       inviteCount: inviteSync.inviteCount,
+      codeAdjustments: reconcileResult,
       users: userSync.users
     })
   } catch (error) {
@@ -1203,11 +1243,32 @@ router.post('/:id/sync-user-count', async (req, res) => {
           await persistAccountTokens(db, accountId, refreshedTokens)
 
           const { userSync, inviteSync } = await syncOnce()
+          const reconcileResult = await withLocks(['purchase'], async () => (
+            reconcileAccountRedemptionCodes(await getDatabase(), {
+              accountEmail: inviteSync.account?.email,
+              userCount: inviteSync.account?.userCount,
+              inviteCount: inviteSync.account?.inviteCount
+            })
+          ))
+          await saveDatabase()
+
+          const messageParts = ['账号同步成功']
+          if (reconcileResult.generatedCount > 0) {
+            messageParts.push(`已补充 ${reconcileResult.generatedCount} 个兑换码`)
+          }
+          if (reconcileResult.removedCount > 0) {
+            messageParts.push(`已回收 ${reconcileResult.removedCount} 个多余兑换码`)
+          }
+          if (reconcileResult.warning) {
+            messageParts.push(reconcileResult.warning)
+          }
+
           return res.json({
-            message: '账号同步成功',
+            message: messageParts.join('，'),
             account: inviteSync.account,
             syncedUserCount: userSync.syncedUserCount,
             inviteCount: inviteSync.inviteCount,
+            codeAdjustments: reconcileResult,
             users: userSync.users
           })
         }
