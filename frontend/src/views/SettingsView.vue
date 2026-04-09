@@ -489,14 +489,6 @@ const applyProxyBatchInput = () => {
   setTimeout(() => (proxySuccess.value = ''), 3000)
   closeProxyBatchDialog()
 }
-const removeProxyRow = (index: number) => {
-  if (proxyRows.value.length <= 1) {
-    proxyRows.value = [createProxyRow()]
-    return
-  }
-  proxyRows.value = proxyRows.value.filter((_, currentIndex) => currentIndex !== index)
-}
-
 watch(proxyDraftProxyUrls, (next, previous) => {
   if (next === previous) return
   syncProxyTestStateWithDraft(next)
@@ -1465,6 +1457,43 @@ const saveProxySettings = async () => {
     setTimeout(() => (proxySuccess.value = ''), 3000)
   } catch (err: any) {
     proxyError.value = err.response?.data?.error || '保存失败'
+  } finally {
+    proxyLoading.value = false
+  }
+}
+
+const removeProxyRow = async (index: number) => {
+  if (proxyLoading.value || proxyTesting.value) return
+
+  const previousRows = proxyRows.value.map(row => ({ ...row }))
+  const nextRows = proxyRows.value.length <= 1
+    ? [createProxyRow()]
+    : proxyRows.value.filter((_, currentIndex) => currentIndex !== index)
+
+  proxyRows.value = nextRows
+  proxyError.value = ''
+  proxySuccess.value = ''
+  proxyLoading.value = true
+
+  try {
+    const response = await adminService.updateProxySettings({
+      proxy: {
+        proxyUrls: nextRows
+          .map(row => row.value.trim())
+          .filter(Boolean)
+          .join('\n'),
+      }
+    })
+    setProxyRowsFromText(response.proxy?.proxyUrls || '')
+    proxyStored.value = Boolean(response.proxy?.stored)
+    proxyEffectiveCount.value = Number(response.proxy?.effectiveCount ?? 0)
+    syncProxyTestStateWithDraft(response.proxy?.proxyUrls || '')
+    proxySuccess.value = '已删除并保存'
+    setTimeout(() => (proxySuccess.value = ''), 3000)
+  } catch (err: any) {
+    proxyRows.value = previousRows.length ? previousRows : [createProxyRow()]
+    syncProxyTestStateWithDraft(proxyDraftProxyUrls.value)
+    proxyError.value = err.response?.data?.error || '删除失败'
   } finally {
     proxyLoading.value = false
   }
