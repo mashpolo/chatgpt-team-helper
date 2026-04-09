@@ -396,12 +396,32 @@ const getProxyRowResult = (value?: string | null) => {
   }
   return null
 }
+const applyProxyTestResults = (results?: AdminProxyTestResult[] | null, options: { lastTestedProxyUrls?: string } = {}) => {
+  const normalizedResults = Array.isArray(results) ? results : []
+  proxyTestResults.value = normalizedResults
+  proxyTestTotal.value = normalizedResults.length
+  proxyTestPassed.value = normalizedResults.filter(item => item?.ok).length
+  proxyTestFailed.value = normalizedResults.length - proxyTestPassed.value
+  proxyLastTestedProxyUrls.value = options.lastTestedProxyUrls ?? ''
+}
 const resetProxyTestState = () => {
-  proxyTestTotal.value = 0
-  proxyTestPassed.value = 0
-  proxyTestFailed.value = 0
-  proxyTestResults.value = []
-  proxyLastTestedProxyUrls.value = ''
+  applyProxyTestResults([], { lastTestedProxyUrls: '' })
+}
+const syncProxyTestStateWithDraft = (draftValue?: string | null) => {
+  const entries = parseProxyEntries(draftValue)
+  if (!entries.length) {
+    resetProxyTestState()
+    return
+  }
+
+  const currentKeys = new Set(entries.flatMap(entry => buildProxyLookupKeys(entry)))
+  const filteredResults = proxyTestResults.value.filter(result => (
+    buildProxyLookupKeys(result.proxy).some(key => currentKeys.has(key))
+  ))
+
+  applyProxyTestResults(filteredResults, {
+    lastTestedProxyUrls: filteredResults.length ? entries.join('\n') : ''
+  })
 }
 const addProxyRow = () => {
   proxyRows.value = [...proxyRows.value, createProxyRow()]
@@ -479,9 +499,7 @@ const removeProxyRow = (index: number) => {
 
 watch(proxyDraftProxyUrls, (next, previous) => {
   if (next === previous) return
-  if (next !== proxyLastTestedProxyUrls.value) {
-    resetProxyTestState()
-  }
+  syncProxyTestStateWithDraft(next)
 })
 
 // 上游履约配置（仅超级管理员）
@@ -1423,7 +1441,7 @@ const loadProxySettings = async () => {
     setProxyRowsFromText(response.proxy?.proxyUrls || '')
     proxyStored.value = Boolean(response.proxy?.stored)
     proxyEffectiveCount.value = Number(response.proxy?.effectiveCount ?? 0)
-    resetProxyTestState()
+    syncProxyTestStateWithDraft(response.proxy?.proxyUrls || '')
   } catch (err: any) {
     proxyError.value = err.response?.data?.error || '加载代理配置失败'
   }
@@ -1442,7 +1460,7 @@ const saveProxySettings = async () => {
     setProxyRowsFromText(response.proxy?.proxyUrls || '')
     proxyStored.value = Boolean(response.proxy?.stored)
     proxyEffectiveCount.value = Number(response.proxy?.effectiveCount ?? 0)
-    resetProxyTestState()
+    syncProxyTestStateWithDraft(response.proxy?.proxyUrls || '')
     proxySuccess.value = '已保存'
     setTimeout(() => (proxySuccess.value = ''), 3000)
   } catch (err: any) {
@@ -1467,11 +1485,9 @@ const testProxySettings = async () => {
         proxyUrls: proxyDraftProxyUrls.value,
       }
     })
-    proxyTestTotal.value = Number(response.total ?? 0)
-    proxyTestPassed.value = Number(response.passed ?? 0)
-    proxyTestFailed.value = Number(response.failed ?? 0)
-    proxyTestResults.value = Array.isArray(response.results) ? response.results : []
-    proxyLastTestedProxyUrls.value = proxyDraftProxyUrls.value
+    applyProxyTestResults(response.results, {
+      lastTestedProxyUrls: proxyDraftProxyUrls.value
+    })
   } catch (err: any) {
     proxyError.value = err.response?.data?.error || '测试失败'
   } finally {

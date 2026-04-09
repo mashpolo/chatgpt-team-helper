@@ -36,6 +36,7 @@ const loading = ref(true)
 const error = ref('')
 const showDialog = ref(false)
 const editingAccount = ref<GptAccount | null>(null)
+const submittingAccountForm = ref(false)
 const paginationMeta = ref({ page: 1, pageSize: 10, total: 0 })
 
 // 搜索和筛选状态
@@ -960,6 +961,7 @@ const openEditDialog = (account: GptAccount) => {
 	const closeDialog = () => {
 	  showDialog.value = false
 	  editingAccount.value = null
+	  submittingAccountForm.value = false
 	  formData.value = { email: '', token: '', refreshToken: '', userCount: 0, isBanned: false, isOpen: true, chatgptAccountId: '', expireAt: '', remark: '' }
 	  checkedChatgptAccounts.value = []
 	  checkAccessTokenError.value = ''
@@ -968,6 +970,9 @@ const openEditDialog = (account: GptAccount) => {
 	}
 
 const handleSubmit = async () => {
+  if (submittingAccountForm.value) return
+
+  submittingAccountForm.value = true
   try {
     const payload: CreateGptAccountDto = {
       ...formData.value,
@@ -997,6 +1002,8 @@ const handleSubmit = async () => {
   } catch (err: any) {
     error.value = err.response?.data?.error || 'Operation failed'
     showErrorToast(error.value)
+  } finally {
+    submittingAccountForm.value = false
   }
 }
 
@@ -1925,14 +1932,14 @@ const handleInviteSubmit = async () => {
                       placeholder="选择过期时间（可选）"
                     />
 		              </div>
-		           </div>
+           </div>
 
            <DialogFooter class="px-8 pb-8 pt-4 shrink-0 border-t border-gray-100 bg-white/80 backdrop-blur">
-              <Button type="button" variant="ghost" @click="closeDialog" class="rounded-xl h-11 px-6 text-gray-500 hover:text-gray-900 hover:bg-gray-100">
+              <Button type="button" variant="ghost" @click="closeDialog" :disabled="submittingAccountForm" class="rounded-xl h-11 px-6 text-gray-500 hover:text-gray-900 hover:bg-gray-100 disabled:opacity-50">
                 取消
               </Button>
-              <Button type="submit" class="rounded-xl h-11 px-6 bg-blue-600 hover:bg-blue-700 text-white shadow-lg shadow-blue-200">
-                保存
+              <Button type="submit" :disabled="submittingAccountForm" class="rounded-xl h-11 px-6 bg-blue-600 hover:bg-blue-700 text-white shadow-lg shadow-blue-200 disabled:opacity-70">
+                {{ submittingAccountForm ? '保存中...' : '保存' }}
               </Button>
          </DialogFooter>
         </form>

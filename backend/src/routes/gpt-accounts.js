@@ -42,6 +42,64 @@ const normalizeNonNegativeInteger = (value, fallback = 0) => {
   return parsed
 }
 
+const mapGptAccountRow = (row) => ({
+  id: row[0],
+  email: row[1],
+  token: row[2],
+  refreshToken: row[3],
+  userCount: row[4],
+  inviteCount: row[5],
+  chatgptAccountId: row[6],
+  oaiDeviceId: row[7],
+  expireAt: row[8] || null,
+  isOpen: Boolean(row[9]),
+  isDemoted: false,
+  isBanned: Boolean(row[10]),
+  remark: row[11] || null,
+  createdAt: row[12],
+  updatedAt: row[13]
+})
+
+const findGptAccountById = (db, accountId) => {
+  const result = db.exec(
+    `
+      SELECT id, email, token, refresh_token, user_count, invite_count, chatgpt_account_id, oai_device_id, expire_at, is_open,
+             COALESCE(is_banned, 0) AS is_banned,
+             remark,
+             created_at, updated_at
+      FROM gpt_accounts
+      WHERE id = ?
+      LIMIT 1
+    `,
+    [accountId]
+  )
+
+  const row = result?.[0]?.values?.[0]
+  return row ? mapGptAccountRow(row) : null
+}
+
+const findLatestGptAccountByEmail = (db, email) => {
+  const normalizedEmail = normalizeEmail(email)
+  if (!normalizedEmail) return null
+
+  const result = db.exec(
+    `
+      SELECT id, email, token, refresh_token, user_count, invite_count, chatgpt_account_id, oai_device_id, expire_at, is_open,
+             COALESCE(is_banned, 0) AS is_banned,
+             remark,
+             created_at, updated_at
+      FROM gpt_accounts
+      WHERE lower(email) = ?
+      ORDER BY id DESC
+      LIMIT 1
+    `,
+    [normalizedEmail]
+  )
+
+  const row = result?.[0]?.values?.[0]
+  return row ? mapGptAccountRow(row) : null
+}
+
 const EXPIRE_AT_REGEX = /^\d{4}\/\d{2}\/\d{2} \d{2}:\d{2}:\d{2}$/
 
 const formatExpireAt = (date) => {
@@ -768,133 +826,173 @@ router.post('/', async (req, res) => {
 
     const normalizedEmail = normalizeEmail(email)
 
-    const db = await getDatabase()
-
-    const initialUserCount = normalizeNonNegativeInteger(userCount, 0)
-    const generatedClientProfile = generateAccountClientProfile(normalizedEmail, normalizedOaiDeviceId)
-
-    db.run(
-      `INSERT INTO gpt_accounts (email, token, refresh_token, user_count, chatgpt_account_id, oai_device_id, expire_at, is_open, is_banned, remark, client_profile_key, client_user_agent, client_accept_language, client_oai_language, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATETIME('now', 'localtime'), DATETIME('now', 'localtime'))`,
+    const createResult = await withLocks(
       [
-        normalizedEmail,
-        token,
-        refreshToken || null,
-        initialUserCount,
-        normalizedChatgptAccountId,
-        generatedClientProfile.oaiDeviceId,
-        normalizedExpireAt,
-        isOpenValue,
-        isBannedValue,
-        normalizedRemark,
-        generatedClientProfile.clientProfileKey,
-        generatedClientProfile.clientUserAgent,
-        generatedClientProfile.clientAcceptLanguage,
-        generatedClientProfile.clientOaiLanguage
-      ]
+        `gpt-account:create:email:${normalizedEmail}`,
+        normalizedChatgptAccountId ? `gpt-account:create:chatgpt:${normalizedChatgptAccountId}` : null
+      ],
+      async () => {
+        const db = await getDatabase()
+
+        const existingByChatgptAccountId = normalizedChatgptAccountId
+          ? db.exec(
+            `
+              SELECT id
+              FROM gpt_accounts
+              WHERE chatgpt_account_id = ?
+              ORDER BY id DESC
+              LIMIT 1
+            `,
+            [normalizedChatgptAccountId]
+          )
+          : []
+        const existingChatgptAccountId = Number(existingByChatgptAccountId?.[0]?.values?.[0]?.[0] || 0)
+        if (existingChatgptAccountId > 0) {
+          return {
+            status: 409,
+            body: {
+              error: '该 ChatGPT ID 对应账号已存在，请刷新列表后编辑',
+              account: findGptAccountById(db, existingChatgptAccountId)
+            }
+          }
+        }
+
+        const existingByEmail = db.exec(
+          `
+            SELECT id
+            FROM gpt_accounts
+            WHERE lower(email) = ?
+            ORDER BY id DESC
+            LIMIT 1
+          `,
+          [normalizedEmail]
+        )
+        const existingEmailAccountId = Number(existingByEmail?.[0]?.values?.[0]?.[0] || 0)
+        if (existingEmailAccountId > 0) {
+          return {
+            status: 409,
+            body: {
+              error: '该邮箱账号已存在，请刷新列表后编辑',
+              account: findGptAccountById(db, existingEmailAccountId)
+            }
+          }
+        }
+
+        const initialUserCount = normalizeNonNegativeInteger(userCount, 0)
+        const generatedClientProfile = generateAccountClientProfile(normalizedEmail, normalizedOaiDeviceId)
+
+        db.run(
+          `INSERT INTO gpt_accounts (email, token, refresh_token, user_count, chatgpt_account_id, oai_device_id, expire_at, is_open, is_banned, remark, client_profile_key, client_user_agent, client_accept_language, client_oai_language, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATETIME('now', 'localtime'), DATETIME('now', 'localtime'))`,
+          [
+            normalizedEmail,
+            token,
+            refreshToken || null,
+            initialUserCount,
+            normalizedChatgptAccountId,
+            generatedClientProfile.oaiDeviceId,
+            normalizedExpireAt,
+            isOpenValue,
+            isBannedValue,
+            normalizedRemark,
+            generatedClientProfile.clientProfileKey,
+            generatedClientProfile.clientUserAgent,
+            generatedClientProfile.clientAcceptLanguage,
+            generatedClientProfile.clientOaiLanguage
+          ]
+        )
+
+        // 必须在任何 await 之前先取出插入主键，避免被其他并发写入改变 last_insert_rowid。
+        const insertedAccountId = Number(db.exec('SELECT last_insert_rowid()')?.[0]?.values?.[0]?.[0] || 0)
+        if (insertedAccountId <= 0) {
+          throw new Error('创建账号后未获取到有效主键')
+        }
+
+        let account = findGptAccountById(db, insertedAccountId) || findLatestGptAccountByEmail(db, normalizedEmail)
+        if (!account) {
+          throw new Error(`创建账号后未找到记录，accountId=${insertedAccountId}`)
+        }
+
+        await saveDatabase()
+
+        let autoCodeWarning = ''
+        try {
+          const userSync = await syncAccountUserCount(account.id, {
+            accountRecord: {
+              id: account.id,
+              email: account.email,
+              token: account.token,
+              refreshToken: account.refreshToken,
+              userCount: account.userCount,
+              inviteCount: account.inviteCount,
+              chatgptAccountId: account.chatgptAccountId,
+              oaiDeviceId: account.oaiDeviceId,
+            },
+            userListParams: { offset: 0, limit: 1, query: '' }
+          })
+          const inviteSync = await syncAccountInviteCount(account.id, {
+            accountRecord: userSync.account,
+            inviteListParams: { offset: 0, limit: 1, query: '' }
+          })
+          account = inviteSync.account
+        } catch (syncError) {
+          autoCodeWarning = '未能同步账号当前人数，已跳过自动生成兑换码'
+          console.warn('[GPT Account Create] sync counts failed, skip auto code generation', {
+            accountId: account.id,
+            email: account.email,
+            message: syncError?.message || String(syncError || '')
+          })
+        }
+
+        const generatedCodes = []
+        let removedCodesCount = 0
+        if (!autoCodeWarning) {
+          const currentUserCount = Number(account.userCount || 0)
+          const currentInviteCount = Number(account.inviteCount || 0)
+          const reconcileResult = await withLocks(['purchase'], async () => (
+            reconcileAccountRedemptionCodes(db, {
+              accountEmail: normalizedEmail,
+              userCount: currentUserCount,
+              inviteCount: currentInviteCount
+            })
+          ))
+
+          generatedCodes.push(...reconcileResult.generatedCodes)
+          removedCodesCount = reconcileResult.removedCount
+
+          if (reconcileResult.warning) {
+            autoCodeWarning = reconcileResult.warning
+          } else if (!generatedCodes.length && getAccountOccupancy({ userCount: currentUserCount, inviteCount: currentInviteCount }) >= 5) {
+            autoCodeWarning = '账号当前人数已接近或达到上限，未自动生成兑换码'
+          }
+        }
+
+        await saveDatabase()
+
+        const messageParts = ['账号创建成功']
+        if (generatedCodes.length > 0) {
+          messageParts.push(`已自动生成${generatedCodes.length}个兑换码`)
+        }
+        if (removedCodesCount > 0) {
+          messageParts.push(`已回收${removedCodesCount}个多余兑换码`)
+        }
+        if (autoCodeWarning) {
+          messageParts.push(autoCodeWarning)
+        }
+
+        return {
+          status: 201,
+          body: {
+            account,
+            generatedCodes,
+            removedCodesCount,
+            syncWarning: autoCodeWarning || null,
+            message: messageParts.join('，')
+          }
+        }
+      }
     )
 
-    await saveDatabase()
-
-		    // 获取新创建账号的ID
-		    const accountResult = db.exec(`
-		      SELECT id, email, token, refresh_token, user_count, invite_count, chatgpt_account_id, oai_device_id, expire_at, is_open,
-		             COALESCE(is_banned, 0) AS is_banned,
-		             remark,
-		             created_at, updated_at
-		      FROM gpt_accounts
-		      WHERE id = last_insert_rowid()
-		    `)
-    const row = accountResult[0].values[0]
-	    let account = {
-	      id: row[0],
-	      email: row[1],
-	      token: row[2],
-	      refreshToken: row[3],
-	      userCount: row[4],
-		      inviteCount: row[5],
-		      chatgptAccountId: row[6],
-		      oaiDeviceId: row[7],
-		      expireAt: row[8] || null,
-		      isOpen: Boolean(row[9]),
-		      isDemoted: false,
-		      isBanned: Boolean(row[10]),
-		      remark: row[11] || null,
-		      createdAt: row[12],
-		      updatedAt: row[13]
-		    }
-
-    let autoCodeWarning = ''
-    try {
-      const userSync = await syncAccountUserCount(account.id, {
-        accountRecord: {
-          id: account.id,
-          email: account.email,
-          token: account.token,
-          refreshToken: account.refreshToken,
-          userCount: account.userCount,
-          inviteCount: account.inviteCount,
-          chatgptAccountId: account.chatgptAccountId,
-          oaiDeviceId: account.oaiDeviceId,
-        },
-        userListParams: { offset: 0, limit: 1, query: '' }
-      })
-      const inviteSync = await syncAccountInviteCount(account.id, {
-        accountRecord: userSync.account,
-        inviteListParams: { offset: 0, limit: 1, query: '' }
-      })
-      account = inviteSync.account
-    } catch (syncError) {
-      autoCodeWarning = '未能同步账号当前人数，已跳过自动生成兑换码'
-      console.warn('[GPT Account Create] sync counts failed, skip auto code generation', {
-        accountId: account.id,
-        email: account.email,
-        message: syncError?.message || String(syncError || '')
-      })
-    }
-
-    const generatedCodes = []
-    let removedCodesCount = 0
-    if (!autoCodeWarning) {
-      const currentUserCount = Number(account.userCount || 0)
-      const currentInviteCount = Number(account.inviteCount || 0)
-      const reconcileResult = await withLocks(['purchase'], async () => (
-        reconcileAccountRedemptionCodes(db, {
-          accountEmail: normalizedEmail,
-          userCount: currentUserCount,
-          inviteCount: currentInviteCount
-        })
-      ))
-
-      generatedCodes.push(...reconcileResult.generatedCodes)
-      removedCodesCount = reconcileResult.removedCount
-
-      if (reconcileResult.warning) {
-        autoCodeWarning = reconcileResult.warning
-      } else if (!generatedCodes.length && getAccountOccupancy({ userCount: currentUserCount, inviteCount: currentInviteCount }) >= 5) {
-        autoCodeWarning = '账号当前人数已接近或达到上限，未自动生成兑换码'
-      }
-    }
-
-    await saveDatabase()
-
-    const messageParts = ['账号创建成功']
-    if (generatedCodes.length > 0) {
-      messageParts.push(`已自动生成${generatedCodes.length}个兑换码`)
-    }
-    if (removedCodesCount > 0) {
-      messageParts.push(`已回收${removedCodesCount}个多余兑换码`)
-    }
-    if (autoCodeWarning) {
-      messageParts.push(autoCodeWarning)
-    }
-
-    res.status(201).json({
-      account,
-      generatedCodes,
-      removedCodesCount,
-      syncWarning: autoCodeWarning || null,
-      message: messageParts.join('，')
-    })
+    return res.status(createResult.status).json(createResult.body)
   } catch (error) {
     console.error('Create GPT account error:', error)
     res.status(500).json({ error: 'Internal server error' })

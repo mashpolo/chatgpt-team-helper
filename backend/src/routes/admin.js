@@ -1468,13 +1468,10 @@ router.put('/proxy-settings', async (req, res) => {
     }
 
     const db = await getDatabase()
-    if (entries.length > 0) {
-      upsertSystemConfigValue(db, GLOBAL_PROXY_URLS_CONFIG_KEY, stringifyProxyUrlEntries(entries))
-    } else {
-      db.run('DELETE FROM system_config WHERE config_key = ?', [GLOBAL_PROXY_URLS_CONFIG_KEY])
-    }
+    // 即使清空代理，也要写入空字符串覆盖环境变量回退，避免刷新后旧代理重新出现。
+    upsertSystemConfigValue(db, GLOBAL_PROXY_URLS_CONFIG_KEY, stringifyProxyUrlEntries(entries))
 
-    saveDatabase()
+    await saveDatabase()
     invalidateGlobalProxySettingsCache()
 
     const settings = await getGlobalProxySettings(db, { forceRefresh: true })
